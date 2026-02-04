@@ -65,21 +65,21 @@ pip install -r requirements.txt
 
 ## 🏃 실행 방법 (Running)
 
-전체 시스템을 가동하려면 **Concierge 서버**와 **Worker 프로세스**를 각각 실행해야 합니다.
-
-**터미널 1: Concierge 서버**
+### Linux / macOS (백그라운드 실행)
+**1. Concierge 실행**
 ```bash
-# /server 디렉토리 내부
-python server.py
-# 서버가 http://localhost:8000 에서 시작됩니다.
+nohup uvicorn server:app --host 0.0.0.0 --port 8000 &
 ```
 
-**터미널 2: Worker 에이전트**
+**2. Worker 실행**
 ```bash
-# /server 디렉토리 내부
-python worker.py
-# Worker가 작업을 기다리기 시작합니다...
+nohup python worker.py > worker.log 2>&1 &
 ```
+
+*(종료 방법 등 상세 내용은 `server/README_KR.md`를 참고하세요)*
+
+### Windows
+`server.py`와 `worker.py`를 각각의 터미널에서 실행하세요.
 
 ## 📚 문서 (Documentation)
 -   [**서버 문서 (Server)**](server/README_KR.md): 상세 아키텍처, MCP 서버/Skill 추가 방법, API 가이드.

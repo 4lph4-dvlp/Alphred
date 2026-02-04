@@ -65,21 +65,21 @@ Create a `.env` file in the `server` directory. Refer to `server/README.md` for 
 
 ## 🏃 Running Alphred
 
-To run the full system, you need to start both the **Concierge Server** and the **Worker** process.
-
-**Terminal 1: Concierge Server**
+### Linux / macOS (Background Service)
+**1. Start Concierge**
 ```bash
-# Inside /server
-python server.py
-# Server runs on http://localhost:8000
+nohup uvicorn server:app --host 0.0.0.0 --port 8000 &
 ```
 
-**Terminal 2: Worker Agent**
+**2. Start Worker**
 ```bash
-# Inside /server
-python worker.py
-# Worker starts polling for tasks...
+nohup python worker.py > worker.log 2>&1 &
 ```
+
+*(See `server/README.md` for details on stopping services)*
+
+### Windows
+Start `server.py` and `worker.py` in separate terminals.
 
 ## 📚 Documentation
 -   [**Server Documentation**](server/README.md): Detailed architecture, adding MCP servers/Skills, and API usage.

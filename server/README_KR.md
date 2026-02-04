@@ -42,24 +42,39 @@ DEFAULT_MODEL=groq/llama-3.3-70b-versatile
 GEMINI_API_KEY=your-gemini-key
 ```
 
-## 🏃 실행 가이드
+## 🏃 실행 및 종료 방법 (Linux/macOS)
+
+### 5.1. 실행 방법
+**Step 1: Concierge (서버) 실행**
+```bash
+source ./venv/bin/activate
+nohup uvicorn server:app --host 0.0.0.0 --port 8000 &
+tail -f nohup.out
+# "Application startup complete" 메시지가 나오면 성공
+```
+
+**Step 2: Worker (에이전트) 실행**
+```bash
+nohup python worker.py > worker.log 2>&1 &
+tail -f worker.log
+```
+
+### 5.2. 종료 방법
+```bash
+# 프로세스 확인
+ps -ef | grep uvicorn
+ps -ef | grep worker.py
+
+# 종료
+kill -9 [PID]
+```
 
 ### Windows (PowerShell)
 ```powershell
-# 터미널 1: Concierge
+.\venv\Scripts\Activate
 python server.py
-
-# 터미널 2: Worker
+# 새 터미널 열기
 python worker.py
-```
-
-### macOS / Linux
-```bash
-# 터미널 1: Concierge
-python3 server.py
-
-# 터미널 2: Worker
-python3 worker.py
 ```
 
 ## 🔌 개발자 가이드

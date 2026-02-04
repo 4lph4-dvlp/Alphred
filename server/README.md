@@ -43,24 +43,38 @@ DEFAULT_MODEL=groq/llama-3.3-70b-versatile
 GEMINI_API_KEY=your-gemini-key
 ```
 
-## 🏃 Execution Guide
+## 🏃 Execution Guide (Linux/macOS)
+
+### 5.1. Start Concierge (Server)
+```bash
+source ./venv/bin/activate
+nohup uvicorn server:app --host 0.0.0.0 --port 8000 &
+tail -f nohup.out
+# Check for "Application startup complete"
+```
+
+### 5.2. Start Worker
+```bash
+nohup python worker.py > worker.log 2>&1 &
+tail -f worker.log
+```
+
+### 5.3. Stop Services
+```bash
+# Find PIDs
+ps -ef | grep uvicorn
+ps -ef | grep worker.py
+
+# Kill process
+kill -9 [PID]
+```
 
 ### Windows (PowerShell)
 ```powershell
-# Terminal 1: Concierge
+.\venv\Scripts\Activate
 python server.py
-
-# Terminal 2: Worker
+# Open a new terminal
 python worker.py
-```
-
-### macOS / Linux
-```bash
-# Terminal 1: Concierge
-python3 server.py
-
-# Terminal 2: Worker
-python3 worker.py
 ```
 
 ## 🔌 Developer Guide
