@@ -3,17 +3,17 @@ import json
 import datetime
 import warnings
 import logging
-import importlib
+import logging
 from contextlib import asynccontextmanager
 from collections import deque
 
-import httpx
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from litellm import completion, embedding
 import litellm
+from prompts import get_system_prompt
 
 # 1. 시스템 설정 및 경고 억제
 load_dotenv()
@@ -34,66 +34,41 @@ class Config:
 # Supabase 클라이언트 초기화
 supabase: Client = create_client(Config.SUPABASE_URL, Config.SUPABASE_SECRET_KEY)
 
-# --- MCP 매니저 (플러그인 및 외부 서버 관리) ---
-
-class MCPManager:
-    def __init__(self, config_path="mcp/mcp_config.json"):
-        self.config_path = config_path
-        self.registry = {}
-        self.specs = []
-        self.load_mcp_apps()
-
-    def load_mcp_apps(self):
-        if not os.path.exists(self.config_path):
-            print(" [경고] mcp/mcp_config.json 파일이 없습니다.")
-            return
-
-        try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-
-            for name, info in config.items():
-                spec_path = os.path.join("mcp", "specs", info["spec_file"])
-                if os.path.exists(spec_path):
-                    with open(spec_path, "r", encoding="utf-8") as sf:
-                        spec = json.load(sf)
-                        self.specs.append(spec)
-                
-                if info["type"] == "local":
-                    module = importlib.import_module(info["module"])
-                    self.registry[name] = {"type": "local", "func": module.execute}
-                elif info["type"] == "external":
-                    self.registry[name] = {"type": "external", "url": info["url"]}
-        except Exception as e:
-            print(f" [오류] MCP 로드 중 에러: {e}")
-
-    def dispatch(self, name: str, args: dict):
-        target = self.registry.get(name)
-        if not target: return f"오류: '{name}' 도구를 찾을 수 없습니다."
-
-        if target["type"] == "local":
-            try: return target["func"](**args)
-            except Exception as e: return f"로컬 플러그인 에러: {str(e)}"
-        else:
-            try:
-                with httpx.Client(timeout=15.0) as client:
-                    r = client.post(target["url"], json={"arguments": args})
-                    return r.json().get("result", "응답 없음")
-            except Exception as e: return f"외부 서버 에러: {str(e)}"
+# --- Alphred 메모리 엔진 ---
 
 # --- Alphred 메모리 엔진 ---
 
 class AlphredMemory:
-    short_term_cache = deque(maxlen=50)
+    @staticmethod
+    def format_memory_content(timestamp, role, content) -> str:
+        """
+        Formats memory unified: [YYYY-MM-DD HH:MM:ss] Role: Content
+        Parses ISO timestamp if string.
+        """
+        try:
+            if isinstance(timestamp, str):
+                dt = datetime.datetime.fromisoformat(timestamp)
+            else:
+                dt = timestamp
+            ts_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            ts_str = str(timestamp)
+            
+        # Normalize role for display
+        display_role = "User" if role.lower() == "user" else "AI"
+        return f"[{ts_str}] {display_role}: {content}"
 
     @staticmethod
     def initialize_cache():
         try:
-            res = supabase.table("memories").select("role", "content").order("created_at", desc=True).limit(50).execute()
+            res = supabase.table("memories").select("role", "content", "created_at").order("created_at", desc=True).limit(50).execute()
             for h in res.data[::-1]:
-                role = "user" if h['role'] == "User" else "assistant"
-                AlphredMemory.short_term_cache.append({"role": role, "content": h['content']})
-        except: pass
+                role = "user" if h['role'] in ["User", "user"] else "assistant"
+                # STM Format: [Time] Role: Content
+                formatted_content = AlphredMemory.format_memory_content(h['created_at'], role, h['content'])
+                AlphredMemory.short_term_cache.append({"role": role, "content": formatted_content})
+        except Exception as e:
+            print(f"[Memory Init Error] {e}")
 
     @staticmethod
     def get_embedding(text):
@@ -121,27 +96,44 @@ class AlphredMemory:
             }).execute()
             if not res.data: return ""
             ctx = "\n[관련된 장기 기억 기록]\n"
-            for m in res.data: ctx += f"- ({m['created_at']}) {m['role']}: {m['content']}\n"
+            for m in res.data:
+                # LTM Format: [Time] Role: Content
+                line = AlphredMemory.format_memory_content(m['created_at'], m['role'], m['content'])
+                ctx += f"- {line}\n"
             return ctx
         except: return ""
 
     @staticmethod
     def store(role, content):
-        cache_role = "user" if role == "User" else "assistant"
-        AlphredMemory.short_term_cache.append({"role": cache_role, "content": content})
+        # Database: Store raw content
+        now = datetime.datetime.now()
         vec = AlphredMemory.get_embedding(content)
+        
+        # Cache: Store formatted content
+        cache_role = "user" if role in ["User", "user"] else "assistant"
+        formatted_content = AlphredMemory.format_memory_content(now, cache_role, content)
+        AlphredMemory.short_term_cache.append({"role": cache_role, "content": formatted_content})
+        
         if vec:
-            try: supabase.table("memories").insert({"role": role, "content": content, "embedding": vec, "created_at": datetime.datetime.now().isoformat()}).execute()
+            try: supabase.table("memories").insert({
+                "role": role, 
+                "content": content,  # Raw content in DB
+                "embedding": vec, 
+                "created_at": now.isoformat()
+            }).execute()
             except: pass
 
 # --- API 서버 설정 ---
 
-mcp_manager = MCPManager()
+from skills.manager import SkillManager
+skill_manager = SkillManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     AlphredMemory.initialize_cache()
+    await skill_manager.activate_skill("task_manager")
     yield
+    await skill_manager.shutdown()
 
 app = FastAPI(title="Alphred API v3.1", lifespan=lifespan)
 
@@ -166,34 +158,24 @@ async def chat_endpoint(request: ChatRequest, x_alphred_token: str = Header(None
     is_lt = len(lt_ctx) > 0
     
     # 2. **업그레이드된 시스템 프롬프트 (High-Level Persona)**
-    system_msg = (
-        "## 당신의 정체성\n"
-        "당신은 'Alphred'입니다. 단순한 챗봇이 아니라, 사용자의 삶을 이해하고 함께 성장하는 지능형 비서이자 협력적 파트너입니다.\n\n"
-        
-        "## 대화 원칙\n"
-        "1. **맥락적 통찰**: 제공된 [기억 기록]과 [대화 내역]을 백과사전식으로 나열하지 마세요. 현재 질문에 필요한 정보만 선별하여 자연스럽게 인용하세요.\n"
-        "2. **입체적 답변**: 답변은 간결하되 풍부한 내용을 담아야 합니다. 사용자의 질문 뒤에 숨은 의도를 파악하고, 필요하다면 보조적인 정보나 조언을 함께 제공하세요.\n"
-        "3. **주도적 리딩**: 대화를 단순히 끝내지 마세요. 답변 끝에 사용자의 프로젝트(Alphred, the_watcher 등)나 관심사에 기반한 질문, 혹은 논리적인 다음 단계를 제안하세요.\n"
-        "4. **톤앤매너**: 통찰력 있고, 지적이며, 때로는 가벼운 위트를 섞어 대화하세요. 비판보다는 지원적이고 긍정적인 자세를 유지합니다.\n\n"
-        
-        "## 도구(MCP) 사용 가이드\n"
-        "- 제공된 도구들은 당신의 능력을 확장하는 수단입니다. 외부 데이터가 반드시 필요하거나 실시간 정보가 요구될 때만 전략적으로 호출하세요.\n"
-        "- 불필요한 도구 호출은 피하되, 호출이 결정되었다면 실행 결과를 답변의 근거로 명확히 활용하세요.\n\n"
-        
-        "당신은 이 모든 문맥을 이해하고 있는 최고의 파트너임을 잊지 마세요."
-    )
-    if lt_ctx: system_msg += f"\n\n[관련 장기 기억 참고]:\n{lt_ctx}"
+    active_skill = skill_manager.get_active_skill()
+    skill_prompt = active_skill.get_system_prompt() if active_skill else ""
+    
+    system_msg = get_system_prompt(lt_ctx, skill_prompt)
     
     messages = [{"role": "system", "content": system_msg}]
     messages.extend(list(AlphredMemory.short_term_cache))
     messages.append({"role": "user", "content": user_input})
 
     try:
+        # Get dynamic tools from active skill
+        tools = await skill_manager.get_tools()
+        
         response = completion(
             model=Config.DEFAULT_MODEL,
             messages=messages,
-            tools=mcp_manager.specs if mcp_manager.specs else None,
-            tool_choice="auto" if mcp_manager.specs else None,
+            tools=tools if tools else None,
+            tool_choice="auto" if tools else None,
             fallbacks=[Config.GEMINI_MODEL]
         )
         
@@ -203,9 +185,12 @@ async def chat_endpoint(request: ChatRequest, x_alphred_token: str = Header(None
             messages.append(msg)
             for tool in msg.tool_calls:
                 name = tool.function.name
+                # Note: Arguments are already JSON string in OpenAI format, but litellm wrapper might give dict?
+                # LiteLLM/OpenAI usually gives string in arguments.
                 args = json.loads(tool.function.arguments)
                 mcp_log.append(name)
-                result = mcp_manager.dispatch(name, args)
+                
+                result = await skill_manager.dispatch_tool_call(name, args)
                 messages.append({"tool_call_id": tool.id, "role": "tool", "name": name, "content": str(result)})
             
             final_res = completion(model=Config.DEFAULT_MODEL, messages=messages)
@@ -217,6 +202,9 @@ async def chat_endpoint(request: ChatRequest, x_alphred_token: str = Header(None
         AlphredMemory.store("AI", answer)
         return ChatResponse(reply=answer, long_term_searched=is_lt, mcp_used=mcp_log)
     except Exception as e:
+        # print error stacktrace for debugging
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

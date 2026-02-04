@@ -1,160 +1,108 @@
-## 0. 준비
----
-GCP 무료 VM 인스턴스 생성 필요
+# Alphred Server & Worker
 
-## 1. VM 방화벽
----
-VPC 네트워크 → 방화벽 → 방화벽 규칙 만들기
+[![Korean Version](https://img.shields.io/badge/Language-Korean-blue)](README_KR.md)
 
-| 이름 |  |
-| --- | --- |
-| 설명 |  |
-| 로그 | 사용 안 함 |
-| 네트워크 | default |
-| 우선순위 | 1000 |
-| 트래픽 방향 | 인그레스 (ingress) |
-| 일치 시 작업 | 허용 |
-| 대상 | 지정된 대상 태그 |
-| 대상 태그 | alphred-server |
-| 소스 필터 | IPv4 범위 |
-| 소스 IPv4 범위 | 0.0.0.0/0 (모든 IP 허용) |
-| 보조 소스 필터 |  |
-| 대상 필터 |  |
-| 프로토콜 및 포트 | 지정된 프로토콜 및 포트 |
-|  | TCP |
-|  | 8000 |
+This directory contains the backend logic for Alphred V3. It hosts the FastAPI server (**Concierge**) and the background execution loop (**Worker**).
 
-Compute Engine → VM 인스턴스 → [설정할 대상 태그] → 수정
+## 🧩 Architecture Components
 
-네트워크 태그에 대상 태그로 설정한 태그 추가
+### 1. Concierge (Server.py)
+The Concierge is the "Face" of Alphred. It interacts with the user via specific endpoints (`/chat`).
+-   **Role**: Intent recognition, conversation management, task delegation.
+-   **Skill**: Uses `TaskManagementSkill` to interact with the database.
+-   **Identity**: Aware that it cannot execute tasks directly.
 
-## 2. Superbase DB 설계 및 설정
----
-### 2.1. 계정 생성
-github 계정 연동
+### 2. Worker (Worker.py)
+The Worker is the "Hands" of Alphred. It has no direct user interface.
+-   **Role**: Task execution, error handling, result reporting.
+-   **Skill**: Uses `GeneralSkill` (or domain-specific skills) equipped with heavy MCP tools.
+-   **Loop**: Polls Supabase for `PENDING` tasks -> Executes -> Updates result.
 
-### 2.2. 프로젝트 생성
-| Organization | 4lph4-dvlp |
-| --- | --- |
-| Project name | Alphred |
-| Database password | 4lphr3d1574mb3573n! |
-| Region | Asia-Pacific |
+### 3. Skill Manager & MCP Client
+-   **`mcp_client/`**: Implements the Standard MCP Protocol. Connects to `stdio` based local servers.
+-   **`skills/`**: Manages "Skills". A Skill resolves to a specific System Prompt and a set of MCP Tools.
+-   **`mcp_servers/`**: Location for local MCP server implementations.
 
-### 2.3. pgvector 활성화
-Database → Extentions → 검색창에 vector 검색 → 활성화
+## 🛠 Configuration (`.env`)
 
-### 2.4. 테이블 설계
-SQL Editor → Private → Untitled File
+Create a `.env` file in this directory with the following keys:
 
-```sql
--- 1. 확장 기능 활성화 (벡터 연산용)
-CREATE EXTENSION IF NOT EXISTS vector;
+```ini
+# Database (Supabase)
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SECRET_KEY=your-service-role-key
 
--- 2. 기존 테이블 및 함수 초기화 (Clean Slate)
-DROP FUNCTION IF EXISTS match_memories;
-DROP TABLE IF EXISTS memories;
-DROP TABLE IF EXISTS user_profile;
+# Authentication
+ALPHRED_ACCESS_TOKEN=your-client-secret-token
 
--- 3. 장기 기억 테이블 생성 (Gemini 768차원 최적화)
-CREATE TABLE memories (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  created_at timestamptz DEFAULT now(),
-  role text NOT NULL,        -- 'User' 또는 'AI'
-  content text NOT NULL,     -- 대화 내용
-  embedding vector(768)      -- Gemini text-embedding-004 임베딩 데이터
-);
+# LLM Provider (Start with 'groq/', 'openai/', or 'gemini/')
+DEFAULT_MODEL=groq/llama-3.3-70b-versatile
+# DEFAULT_MODEL=openai/gpt-4-turbo
 
--- 4. 사용자 프로필 테이블 생성
-CREATE TABLE user_profile (
-  id int8 PRIMARY KEY DEFAULT 1,
-  name text,
-  preferences jsonb DEFAULT '{"model_priority": ["groq/llama-3.3-70b-versatile", "gemini/gemini-1.5-flash"]}',
-  updated_at timestamptz DEFAULT now()
-);
-
--- 5. 기본 사용자 데이터 삽입
-INSERT INTO user_profile (id, name) VALUES (1, '알파');
-
--- 6. 고속 검색을 위한 벡터 인덱스 생성
-CREATE INDEX ON memories USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-
--- 7. [핵심] 시간 필터링이 포함된 벡터 검색 함수 등록
-CREATE OR REPLACE FUNCTION match_memories (
-  query_embedding vector(768),
-  match_threshold float,
-  match_count int,
-  from_date timestamptz DEFAULT '-infinity',
-  to_date timestamptz DEFAULT 'infinity'
-)
-RETURNS TABLE (
-  id uuid,
-  content text,
-  role text,
-  created_at timestamptz,
-  similarity float
-)
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  RETURN QUERY
-  SELECT
-    memories.id,
-    memories.content,
-    memories.role,
-    memories.created_at,
-    1 - (memories.embedding <=> query_embedding) AS similarity
-  FROM memories
-  WHERE (1 - (memories.embedding <=> query_embedding) > match_threshold)
-    AND (memories.created_at >= from_date)
-    AND (memories.created_at <= to_date)
-  ORDER BY memories.embedding <=> query_embedding
-  LIMIT match_count;
-END;
-$$;
+# Embedding (Gemini recommended)
+GEMINI_API_KEY=your-gemini-key
 ```
 
-이후 Run으로 실행행
+## 🏃 Execution Guide
 
-### 2.5. API 키 확인
-Project Settings → API Keys
-Publishable key와 Secret keys 확인
+### Windows (PowerShell)
+```powershell
+# Terminal 1: Concierge
+python server.py
 
-### 2.6. 데이터 조작
-**모든 데이터 삭제**
-```sql
-DELETE FROM memories;
+# Terminal 2: Worker
+python worker.py
 ```
 
-**특정 ID 데이터 삭제**
-```sql
-DELETE FROM memories WHERE id = 'uuid-값';
-```
-
-**특정 날짜 이전 데이터 삭제**
-```sql
-DELETE FROM memories WHERE created_at < '2026-01-01';
-```
-
-**AI가 대답한 내용만 삭제**
-```sql
-DELETE FROM memories WHERE role = 'AI';
-```
-
-**특정 단어가 포함된 기록 삭제**
-```sql
-DELETE FROM memories WHERE content LIKE '%비밀번호%';
-```
-
-## 3. 실행 및 종료 방법
----
-### 3.1. 실행 방법
+### macOS / Linux
 ```bash
-source ./venv/bin/activate
-nohup uvicorn server:app --host 0.0.0.0 --port 8000 &
-tail -f nohup.out #Application startup complete 나오면 됨
+# Terminal 1: Concierge
+python3 server.py
+
+# Terminal 2: Worker
+python3 worker.py
 ```
-### 3.2. 종료 방법
-```bash
-ps -ef | grep uvicorn
-kill -[ps로 구한 PID]
+
+## 🔌 Developer Guide
+
+### How to Add a New MCP Server
+Alphred follows the **Standard Model Context Protocol**. You can add any standard MCP server.
+
+1.  **Local Server**:
+    -   Place the code in `mcp_servers/<server_name>`.
+    -   Or install via npm/pip globally.
+2.  **Registering**:
+    -   Update the corresponding Skill definition (e.g., `skills/definitions/general.py`).
+    -   Add the server config to the `mcp_servers` list in the Skill class.
+
+```python
+# Example in general.py
+self.mcp_servers = [
+    {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:/Work"]
+    }
+]
 ```
+
+### How to Add a New Skill
+Skills allow Alphred to switch contexts (e.g., from General Helper to specialized Coder).
+
+1.  **Create Definition**: Create `server/skills/definitions/my_skill.py`.
+2.  **Inherit**: Inherit from `skills.base.Skill`.
+3.  **Define**: Set `name`, `description`, `system_prompt`, and `mcp_servers`.
+4.  **Register**: Update `skills/manager.py` (if using a static registry) or rely on dynamic loading (if implemented).
+
+```python
+class MySkill(Skill):
+    def __init__(self):
+        super().__init__()
+        self.name = "coding_expert"
+        self.system_prompt = "You are a senior python developer..."
+        self.mcp_servers = [...] # Coding specific tools
+```
+
+## ✅ Standard Compliance
+This project strictly adheres to:
+-   **MCP Specification**: Uses standard JSON-RPC 2.0 via stdio for tool communication.
+-   **OpenAI Tool Format**: Automatically converts MCP tool schemas to OpenAI-compatible JSON.

@@ -3,6 +3,7 @@ uvicorn
 langchain
 langchain-community
 litellm
+mcp
 supabase
 psycopg2-binary
 python-dotenv
