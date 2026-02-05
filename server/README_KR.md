@@ -80,41 +80,108 @@ python worker.py
 ## 🔌 개발자 가이드
 
 ### 새로운 MCP 서버 추가 방법
-Alphred는 **표준 Model Context Protocol**을 따릅니다. 존재하는 모든 표준 MCP 서버를 연결할 수 있습니다.
 
-1.  **서버 준비**:
-    -   `mcp_servers/<server_name>`에 코드를 두거나,
-    -   `npm` 또는 `pip`로 글로벌 설치된 명령어를 사용합니다.
-2.  **등록**:
-    -   사용하려는 스킬의 정의 파일(예: `skills/definitions/general.py`)을 수정합니다.
-    -   `mcp_servers` 리스트에 설정을 추가합니다.
+Alphred는 **표준 Model Context Protocol**을 따릅니다. 로컬 소스 또는 Smithery 같은 원격 패키지 매니저를 통해 MCP 서버를 추가할 수 있습니다.
+
+#### 1. 로컬 MCP 서버 추가 (예시: Notion)
+
+**가정**: [Notion MCP Server](https://github.com/makenotion/notion-mcp-server) 소스코드를 직접 받아 실행하려 합니다.
+
+1.  **다운로드 및 빌드**:
+    ```bash
+    # Alphred 서버 디렉토리 기준
+    cd server
+    mkdir -p mcp_servers
+    cd mcp_servers
+    
+    # 리포지토리 클론
+    git clone https://github.com/makenotion/notion-mcp-server.git
+    cd notion-mcp-server
+    
+    # 의존성 설치 및 빌드
+    npm install
+    npm run build
+    
+    # 빌드 결과 확인 (보통 build/src/index.js 또는 dist/index.js)
+    ls build/src/index.js
+    ```
+
+2.  **스킬에 설정하기**:
+    아래 "새로운 Skill 추가 방법 (모듈식 접근)"을 참고하여 설정합니다.
+
+#### 2. 원격 MCP 서버 추가 (예시: Brave Search via Smithery)
+
+**가정**: Smithery를 통해 [Brave Search](https://smithery.ai/server/@modelcontextprotocol/server-brave-search)를 실행하려 합니다.
+
+1.  **준비물**: 유효한 Brave API Key가 필요합니다.
+2.  **명령어 구성**:
+    `npx`를 사용하여 Smithery CLI를 실행합니다.
+    Command: `npx`
+    Args: `["-y", "@smithery/cli", "run", "@modelcontextprotocol/server-brave-search", "--config", "{\"braveApiKey\": \"YOUR_KEY\"}"]`
+
+### 새로운 Skill 추가 방법 (모듈식 접근)
+
+하나의 거대한 파일(`general.py`)을 수정하는 대신, 각 스킬별로 독립적인 파일을 생성하는 방식을 권장합니다. `SkillManager`는 `server/skills/definitions/` 폴더 내의 모든 `.py` 파일을 자동으로 로드합니다.
+
+#### 예시 1: Notion Skill (`server/skills/definitions/notion_skill.py`)
+앞서 빌드한 **로컬 Notion MCP**를 사용하는 스킬입니다.
 
 ```python
-# general.py 예시
-self.mcp_servers = [
-    {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:/Work"]
-    }
-]
-```
+import os
+from skills.base import Skill
 
-### 새로운 Skill 추가 방법
-Skill은 Alphred가 컨텍스트(예: 일반 작업 -> 전문 코딩 작업)를 전환하게 해줍니다.
-
-1.  **정의 생성**: `server/skills/definitions/my_skill.py` 파일을 생성합니다.
-2.  **상속**: `skills.base.Skill`을 상속받습니다.
-3.  **정의**: `name`, `description`, `system_prompt`, `mcp_servers`를 설정합니다.
-4.  **등록**: `SkillManager`가 로드할 수 있도록 설정합니다.
-
-```python
-class MySkill(Skill):
+class SkillImpl(Skill):
     def __init__(self):
         super().__init__()
-        self.name = "coding_expert"
-        self.system_prompt = "당신은 시니어 파이썬 개발자입니다..."
-        self.mcp_servers = [...] # 코딩 관련 도구들
+        self.name = "notion_assistant"
+        self.description = "노션 페이지와 콘텐츠를 관리합니다."
+        self.system_prompt = "당신은 노션 전문가입니다. 사용자의 워크스페이스 관리를 돕습니다."
+        self.mcp_servers = []
+        
+        # 로컬 빌드된 서버의 절대 경로
+        server_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../mcp_servers/notion-mcp-server/build/src/index.js"))
+        
+        if os.path.exists(server_path):
+            self.mcp_servers.append({
+                "command": "node",
+                "args": [server_path],
+                "env": {
+                    "NOTION_API_KEY": os.getenv("NOTION_API_KEY")
+                }
+            })
 ```
+
+#### 예시 2: 검색 Skill (`server/skills/definitions/search_skill.py`)
+Smithery를 통해 **원격 Brave Search MCP**를 사용하는 스킬입니다.
+
+```python
+import os
+from skills.base import Skill
+
+class SkillImpl(Skill):
+    def __init__(self):
+        super().__init__()
+        self.name = "web_searcher"
+        self.description = "실시간 웹 정보를 검색합니다."
+        self.system_prompt = "당신은 웹 리서처입니다. Brave Search를 통해 정확한 정보를 찾으세요."
+        self.mcp_servers = []
+        
+        brave_key = os.getenv("BRAVE_API_KEY")
+        if brave_key:
+            self.mcp_servers.append({
+                "command": "npx",
+                "args": [
+                    "-y",
+                    "@smithery/cli",
+                    "run",
+                    "@modelcontextprotocol/server-brave-search",
+                    "--config",
+                    f'{{"braveApiKey": "{brave_key}"}}'
+                ]
+            })
+```
+
+**참고**: 파일을 생성한 후 서버를 재시작하면, `SkillManager`가 자동으로 `notion_assistant`와 `web_searcher` 스킬을 인식하고 로드합니다.
 
 ## ✅ 표준 준수
 이 프로젝트는 다음 표준을 엄격히 준수합니다:

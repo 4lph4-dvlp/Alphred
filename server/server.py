@@ -39,6 +39,8 @@ supabase: Client = create_client(Config.SUPABASE_URL, Config.SUPABASE_SECRET_KEY
 # --- Alphred 메모리 엔진 ---
 
 class AlphredMemory:
+    short_term_cache = deque(maxlen=10)
+    
     @staticmethod
     def format_memory_content(timestamp, role, content) -> str:
         """
@@ -158,7 +160,7 @@ async def chat_endpoint(request: ChatRequest, x_alphred_token: str = Header(None
     is_lt = len(lt_ctx) > 0
     
     # 2. **업그레이드된 시스템 프롬프트 (High-Level Persona)**
-    active_skill = skill_manager.get_active_skill()
+    active_skill = skill_manager.active_skill
     skill_prompt = active_skill.get_system_prompt() if active_skill else ""
     
     system_msg = get_system_prompt(lt_ctx, skill_prompt)
