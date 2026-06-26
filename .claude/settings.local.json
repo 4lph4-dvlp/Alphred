@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(pip show *)",
+      "PowerShell(pip install *)",
+      "PowerShell(python \"D:\\\\dev\\\\Alphred\\\\_extract.py\")",
+      "Bash(echo \"=== version ===\")",
+      "Bash(/c/Users/alpha/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes --version)",
+      "Bash(echo \"=== api_server routes ===\")",
+      "Read(//c/Users/alpha/AppData/Local/hermes/hermes-agent/gateway/platforms/**)",
+      "Bash(echo \"=== hermes_state \\(SessionDB\\) ===\")",
+      "Read(//c/Users/alpha/AppData/Local/hermes/hermes-agent/**)",
+      "Bash(/c/Users/alpha/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes config *)",
+      "Bash(echo \"=== runs handler: store/response_id/conversation_history 기록 여부 ===\")",
+      "Bash(echo \"=== 모든 _response_store.put 위치\\(어느 핸들러인지\\) ===\")",
+      "Bash(grep -nE '_response_store\\\\.put|def _handle_\\(run|responses|chat\\)|interrupt|finally:|except \\(asyncio\\\\.\\)?CancelledError' /c/Users/alpha/AppData/Local/hermes/hermes-agent/gateway/platforms/api_server.py)",
+      "Bash(python -m py_compile poc/verify_primitives.py)",
+      "Bash(grep -vE \"^$\")",
+      "Bash(python -c \"import textual, rich; print\\('textual', textual.__version__, '| rich', rich.__version__\\)\")",
+      "Bash(grep -nA3 \"def chat_completions\" alphred/gateway.py)",
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Read(//c/Users/alpha/Desktop/**)",
+      "Read(//c/Users/alpha/Pictures/Screenshots/**)",
+      "Read(//c/Users/alpha/**)",
+      "Bash(echo \"=== parse_reasoning_effort 값 ===\")",
+      "Bash(PYTHONUTF8=1 grep -niA18 'def parse_reasoning_effort' C:/Users/alpha/AppData/Local/hermes/hermes-agent/hermes_constants.py)"
+    ]
+  }
+}
