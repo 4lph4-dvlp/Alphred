@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -52,10 +53,30 @@ CREATE TABLE IF NOT EXISTS task_events (
   reason    TEXT,
   at        TEXT
 );
+CREATE TABLE IF NOT EXISTS intent_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  at         TEXT,
+  source     TEXT,
+  engine     TEXT,
+  kind       TEXT,
+  priority   INTEGER,
+  depth      TEXT,
+  confidence INTEGER,
+  reason     TEXT,
+  prompt     TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_tasks_state_priority ON tasks(state, priority DESC, created_at ASC);
 """
 
 _TASK_COLS = list(Task.__dataclass_fields__.keys())
+
+
+def _col_ddl(field: dataclasses.Field) -> str:
+    """dataclass 필드 → SQLite 컬럼 DDL(타입/기본값). int 만 NOT NULL DEFAULT, 그 외 TEXT."""
+    if field.type in ("int", int):
+        default = field.default if field.default is not dataclasses.MISSING else 0
+        return f"INTEGER NOT NULL DEFAULT {default}"
+    return "TEXT"
 
 
 def _now() -> str:
@@ -81,19 +102,15 @@ class Store:
         self._migrate()
 
     def _migrate(self) -> None:
-        """기존 DB 에 누락된 컬럼을 추가(가벼운 마이그레이션)."""
+        """Task dataclass 를 기준으로 기존 DB 에 누락된 컬럼을 자동 추가한다.
+
+        삽입 컬럼(_TASK_COLS)·스키마·마이그레이션이 모두 dataclass 한 곳에서
+        파생되므로, Task 에 필드만 추가하면 스키마가 자동으로 따라온다(drift 방지).
+        """
         have = {r["name"] for r in self._conn.execute("PRAGMA table_info(tasks)")}
-        for col, ddl in (("retries", "INTEGER NOT NULL DEFAULT 0"),
-                         ("retry_not_before", "TEXT"),
-                         ("plan", "TEXT"),
-                         ("plan_progress", "INTEGER NOT NULL DEFAULT 0"),
-                         ("plan_activity", "TEXT"),
-                         ("depth", "TEXT"),
-                         ("verify_report", "TEXT"),
-                         ("verify_attempts", "INTEGER NOT NULL DEFAULT 0"),
-                         ("verify_feedback", "TEXT")):
-            if col not in have:
-                self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {ddl}")
+        for name, field in Task.__dataclass_fields__.items():
+            if name not in have:
+                self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {_col_ddl(field)}")
 
     def close(self) -> None:
         self._conn.close()
@@ -207,6 +224,61 @@ class Store:
             self._conn.execute("ROLLBACK")
             raise
         return self.get(task_id)  # type: ignore[return-value]
+
+    # ---- 영구 삭제 ----
+    def delete(self, task_id: str) -> bool:
+        """작업 행과 그 이벤트를 영구 삭제한다(원자적). 존재했으면 True."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = self._conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+            self._conn.execute("DELETE FROM task_events WHERE task_id=?", (task_id,))
+            self._conn.execute("COMMIT")
+            return cur.rowcount > 0
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def delete_by_states(self, states: list[str]) -> int:
+        """주어진 상태의 작업들을 (이벤트 포함) 영구 삭제하고 삭제 건수를 반환한다."""
+        if not states:
+            return 0
+        ph = ", ".join("?" for _ in states)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            ids = [r["id"] for r in self._conn.execute(
+                f"SELECT id FROM tasks WHERE state IN ({ph})", states).fetchall()]
+            if ids:
+                iph = ", ".join("?" for _ in ids)
+                self._conn.execute(f"DELETE FROM task_events WHERE task_id IN ({iph})", ids)
+                self._conn.execute(f"DELETE FROM tasks WHERE id IN ({iph})", ids)
+            self._conn.execute("COMMIT")
+            return len(ids)
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    # ---- §34.7 의도 판정 텔레메트리 ----
+    def log_intent(self, *, source: str, engine: str, kind: str, priority: int,
+                   depth: str | None = None, confidence: int | None = None,
+                   reason: str = "", prompt: str = "") -> None:
+        """분류 판정 1건 기록 — 의도 정확도의 사후 측정 근거(엔진 라벨·근거·입력 요약)."""
+        self._conn.execute(
+            "INSERT INTO intent_log (at,source,engine,kind,priority,depth,confidence,"
+            "reason,prompt) VALUES (?,?,?,?,?,?,?,?,?)",
+            (_now(), source, engine, kind, int(priority) if priority is not None else None,
+             depth, confidence, (reason or "")[:200], (prompt or "")[:200]),
+        )
+
+    def intent_stats(self) -> dict:
+        """엔진별 판정 건수 집계(doctor/평가용, 무비용)."""
+        rows = self._conn.execute(
+            "SELECT engine, kind, COUNT(*) AS n FROM intent_log GROUP BY engine, kind"
+        ).fetchall()
+        out: dict = {}
+        for r in rows:
+            e = out.setdefault(r["engine"] or "?", {})
+            e[r["kind"] or "?"] = r["n"]
+        return out
 
     # ---- 내부 ----
     def _log(self, task_id: str, frm, to, reason: str) -> None:

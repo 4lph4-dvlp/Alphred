@@ -9,9 +9,7 @@ CLI:     alphred queue ask "리포트 작업 우선순위 올려줘"
 """
 from __future__ import annotations
 
-import json
-import re
-
+from .jsonutil import parse_json_object
 from .runtime import resolve_task_id
 
 # 자연어로 조작 가능한 액션(화이트리스트). 그 외는 실행하지 않는다.
@@ -55,16 +53,8 @@ def build_prompt(request: str, tasks) -> str:
 
 def parse(text: str) -> dict | None:
     """LLM 응답에서 {reply, actions} 를 추출. 실패 시 None."""
-    if not text:
-        return None
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        return None
-    try:
-        d = json.loads(m.group(0))
-    except Exception:
-        return None
-    if not isinstance(d, dict):
+    d = parse_json_object(text)
+    if d is None:
         return None
     actions = d.get("actions")
     clean: list[dict] = []

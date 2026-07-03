@@ -1,6 +1,7 @@
 """상태 제어 머신 — 허용된 전이만 강제한다 (QA-7.4).
 
-전이 규칙(기획 2.1, §21):
+전이 규칙(기획 2.1, §21, §34.4):
+  AwaitingInput → Pending, Discarded   (답변 수신/타임아웃 → 실행 대기열 진입)
   Pending     → In-Progress, Discarded
   In-Progress → Paused, Completed, NeedsReview, Discarded
   Paused      → In-Progress, Discarded
@@ -13,6 +14,8 @@ from __future__ import annotations
 from .models import TaskState
 
 ALLOWED: dict[TaskState, set[TaskState]] = {
+    # 착수 전 질문 대기(§34.4) — 스케줄 비대상. 답변/타임아웃으로 Pending, 취소로 Discarded.
+    TaskState.AWAITING_INPUT: {TaskState.PENDING, TaskState.DISCARDED},
     TaskState.PENDING: {TaskState.IN_PROGRESS, TaskState.DISCARDED},
     TaskState.IN_PROGRESS: {TaskState.PAUSED, TaskState.COMPLETED,
                             TaskState.NEEDS_REVIEW, TaskState.DISCARDED},

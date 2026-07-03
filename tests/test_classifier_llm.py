@@ -4,8 +4,9 @@ from __future__ import annotations
 from alphred import classifier
 from alphred.classifier import parse_classification
 from alphred.db import Store, new_id
+from alphred.llm_calls import make_hermes_classifier
 from alphred.models import TaskKind
-from alphred.queue_manager import QueueManager, make_hermes_classifier
+from alphred.queue_manager import QueueManager
 
 
 # ---- 파서 ----

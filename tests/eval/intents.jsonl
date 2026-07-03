@@ -1,0 +1,51 @@
+{"prompt": "안녕!", "source": "tui", "expect_kind": "light", "note": "인사"}
+{"prompt": "hi there", "source": "chat", "expect_kind": "light", "note": "greeting"}
+{"prompt": "2+2는 뭐야?", "source": "tui", "expect_kind": "light", "note": "계산"}
+{"prompt": "what's the capital of France?", "source": "api", "expect_kind": "light", "note": "lookup"}
+{"prompt": "이 문장 영어로 번역해줘: 좋은 아침입니다", "source": "tui", "expect_kind": "light", "note": "번역"}
+{"prompt": "translate 'hello' to Korean", "source": "chat", "expect_kind": "light", "note": "translation"}
+{"prompt": "큐에 등록된 작업들 상태 보여줘", "source": "tui", "expect_kind": "light", "note": "상태조회"}
+{"prompt": "아까 보고서 작업 어떻게 됐어?", "source": "tui", "expect_kind": "light", "note": "상태조회"}
+{"prompt": "오늘 날짜가 며칠이지?", "source": "tui", "expect_kind": "light", "note": "단답"}
+{"prompt": "파이썬에서 리스트 뒤집는 법 알려줘", "source": "chat", "expect_kind": "light", "note": "짧은 QA"}
+{"prompt": "what does HTTP 429 mean?", "source": "api", "expect_kind": "light", "note": "lookup"}
+{"prompt": "고마워, 잘 됐어", "source": "tui", "expect_kind": "light", "note": "잡담"}
+{"prompt": "방금 답변 한 줄로 요약해줘", "source": "tui", "expect_kind": "light", "note": "직전 답변 요약=즉답"}
+{"prompt": "give me a one-line summary of this paragraph: The quick brown fox jumps over the lazy dog near the river bank.", "source": "chat", "expect_kind": "light", "note": "긴 채팅이지만 즉답 — 정규식 함정"}
+{"prompt": "내일 서울 날씨 어때?", "source": "tui", "expect_kind": "light", "note": "실시간"}
+{"prompt": "recommend a good sci-fi book", "source": "chat", "expect_kind": "light", "note": "추천"}
+{"prompt": "이 에러 메시지 무슨 뜻이야? TypeError: 'NoneType' object is not subscriptable", "source": "tui", "expect_kind": "light", "note": "에러 설명=즉답"}
+{"prompt": "convert 100 USD to KRW", "source": "api", "expect_kind": "light", "note": "환산"}
+{"prompt": "설치된 스킬 목록 알려줘", "source": "tui", "expect_kind": "light", "note": "설치 조회=Light"}
+{"prompt": "which model are you using right now?", "source": "chat", "expect_kind": "light", "note": "메타 질문"}
+{"prompt": "지금 진행 중인 작업 일시정지해줘", "source": "tui", "expect_kind": "light", "note": "큐 제어=즉답"}
+{"prompt": "what time is it in UTC?", "source": "api", "expect_kind": "light", "note": "단답"}
+{"prompt": "이 단어 스펠링 맞아? 'recieve'", "source": "tui", "expect_kind": "light", "note": "교정"}
+{"prompt": "tell me a joke", "source": "chat", "expect_kind": "light", "note": "잡담"}
+{"prompt": "README 파일이 뭐 하는 파일이야?", "source": "chat", "expect_kind": "light", "note": "개념 질문"}
+{"prompt": "이 코드 한 줄이 왜 동작하는지 설명해줘: x = y or []", "source": "chat", "expect_kind": "light", "note": "설명=즉답"}
+{"prompt": "전체 코드베이스 리팩토링 해줘", "source": "tui", "expect_kind": "heavy", "note": "대규모 마커"}
+{"prompt": "refactor the entire codebase to use async IO", "source": "api", "expect_kind": "heavy", "note": "large scope"}
+{"prompt": "이번 주 AI 뉴스 크롤링해서 요약 보고서 만들어줘", "source": "tui", "expect_kind": "heavy", "note": "크롤+보고서"}
+{"prompt": "crawl these 200 pages and summarize each one", "source": "api", "expect_kind": "heavy", "note": "crawl"}
+{"prompt": "미국 주식 시장 분석해서 PDF 보고서로 저장해줘", "source": "tui", "expect_kind": "heavy", "note": "분석+산출물"}
+{"prompt": "build a PDF report on the Korean housing market", "source": "api", "expect_kind": "heavy", "note": "report artifact"}
+{"prompt": "우리 회사 소개 자료를 파워포인트로 하나 만들어줘", "source": "tui", "expect_kind": "heavy", "note": "짧은 채팅이지만 산출물 — 정규식 함정"}
+{"prompt": "지난 분기 매출 데이터로 차트 만들어서 엑셀로 저장해줘", "source": "tui", "expect_kind": "heavy", "note": "짧은 채팅이지만 산출물 — 정규식 함정"}
+{"prompt": "write unit tests for every module in this project", "source": "api", "expect_kind": "heavy", "note": "multi-file"}
+{"prompt": "모든 테스트 파일 점검하고 깨진 것 고쳐줘", "source": "tui", "expect_kind": "heavy", "note": "모든 파일 마커"}
+{"prompt": "migrate the database from sqlite to postgres", "source": "api", "expect_kind": "heavy", "note": "migration"}
+{"prompt": "DB 스키마 마이그레이션 계획 세우고 실행해줘", "source": "tui", "expect_kind": "heavy", "note": "마이그레이션"}
+{"prompt": "학습 데이터셋 수집해서 모델 학습 돌려줘", "source": "api", "expect_kind": "heavy", "note": "수집+학습"}
+{"prompt": "benchmark our API against the top 3 competitors", "source": "api", "expect_kind": "heavy", "note": "benchmark"}
+{"prompt": "이 저장소의 의존성 전부 최신으로 업데이트하고 테스트 돌려줘", "source": "tui", "expect_kind": "heavy", "note": "일괄 작업"}
+{"prompt": "scrape product prices from these sites daily and build a tracker", "source": "api", "expect_kind": "heavy", "note": "scrape+build"}
+{"prompt": "신제품 런칭 계획서를 워드 문서로 작성해서 저장해줘", "source": "tui", "expect_kind": "heavy", "note": "짧은 채팅이지만 산출물 — 정규식 함정"}
+{"prompt": "research the GPU market this quarter and give me a detailed brief", "source": "api", "expect_kind": "heavy", "note": "리서치"}
+{"prompt": "파이썬 3.13 새 기능 정리해서 블로그 글 초안 써줘", "source": "tui", "expect_kind": "heavy", "note": "조사+작성 — 정규식 함정"}
+{"prompt": "install the antigravity-cli skill and enable it", "source": "api", "expect_kind": "heavy", "note": "설치=백그라운드"}
+{"prompt": "powerpoint 스킬 설치해줘", "source": "tui", "expect_kind": "heavy", "note": "설치=백그라운드"}
+{"prompt": "analyze last month's server logs and find the root cause of the outages", "source": "api", "expect_kind": "heavy", "note": "분석"}
+{"prompt": "서버 로그 분석해서 장애 원인 보고서 만들어줘", "source": "tui", "expect_kind": "heavy", "note": "짧은 채팅이지만 분석+산출물 — 정규식 함정"}
+{"prompt": "create a full-stack todo app with auth and deploy it locally", "source": "api", "expect_kind": "heavy", "note": "개발 작업"}
+{"prompt": "이 CSV 파일 열어서 이상치 찾고 정리된 리포트 뽑아줘", "source": "api", "expect_kind": "heavy", "note": "데이터+리포트"}

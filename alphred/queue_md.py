@@ -10,6 +10,7 @@ from pathlib import Path
 from .models import Task, TaskState
 
 _STATE_EMOJI = {
+    TaskState.AWAITING_INPUT.value: "❓",
     TaskState.PENDING.value: "⏳",
     TaskState.IN_PROGRESS.value: "▶️",
     TaskState.PAUSED.value: "⏸️",
@@ -18,7 +19,8 @@ _STATE_EMOJI = {
     TaskState.DISCARDED.value: "🗑️",
 }
 
-_ACTIVE = [TaskState.IN_PROGRESS.value, TaskState.PAUSED.value, TaskState.PENDING.value]
+_ACTIVE = [TaskState.IN_PROGRESS.value, TaskState.PAUSED.value, TaskState.PENDING.value,
+           TaskState.AWAITING_INPUT.value]
 _DONE = [TaskState.COMPLETED.value, TaskState.NEEDS_REVIEW.value, TaskState.DISCARDED.value]
 
 

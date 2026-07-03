@@ -23,7 +23,13 @@
       "Read(//c/Users/alpha/Pictures/Screenshots/**)",
       "Read(//c/Users/alpha/**)",
       "Bash(echo \"=== parse_reasoning_effort 값 ===\")",
-      "Bash(PYTHONUTF8=1 grep -niA18 'def parse_reasoning_effort' C:/Users/alpha/AppData/Local/hermes/hermes-agent/hermes_constants.py)"
+      "Bash(PYTHONUTF8=1 grep -niA18 'def parse_reasoning_effort' C:/Users/alpha/AppData/Local/hermes/hermes-agent/hermes_constants.py)",
+      "Bash(grep -rnE 'from .{1,2}gateway import|from alphred.gateway import|gateway\\\\._' alphred/ tests/)",
+      "Bash(python -m pyflakes alphred/)",
+      "Bash(python -m pytest tests/test_quality.py -q -k \"reasoning\")",
+      "Bash(python -m pytest -q)",
+      "Bash(python -m pytest tests/test_watchdog_m5.py -q)",
+      "PowerShell(python -c \"from textual.widgets import Static; s=Static\\('hi'\\); print\\([a for a in dir\\(s\\) if 'content' in a.lower\\(\\) or 'render' in a.lower\\(\\)]\\); print\\(type\\(s.content\\), repr\\(s.content\\)\\)\")"
     ]
   }
 }

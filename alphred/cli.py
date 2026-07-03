@@ -17,7 +17,8 @@ from .runtime import build_manager, resolve_task_id
 # Alphred 가 직접 처리하는 서브커맨드(나머지는 전부 Hermes 로 위임)
 # 주의: `gateway` 는 가로채지 않고 Hermes 로 위임해 1:1 매핑 유지(QA-1.3).
 #       Alphred 자체 HTTP 게이트웨이는 `alphred serve` 로 띄운다.
-_INTERCEPT = {"queue", "serve", "setup", "tui", "doctor"}
+_INTERCEPT = {"queue", "serve", "setup", "tui", "doctor", "prompt", "tune",
+              "keys", "connect", "service"}
 
 
 def _delegate_to_hermes(argv: list[str]) -> int:
@@ -48,10 +49,14 @@ def _cmd_queue(argv: list[str]) -> int:
     sp.add_argument("prompt")
     sp.add_argument("--priority", type=int, default=None)
     sp.add_argument("--kind", choices=["light", "heavy"], default=None)
+    sp.add_argument("--depth", choices=["low", "mid", "high"], default=None,
+                    help="작업 심화도 고정(미지정 시 자동 판정)")
     sp.add_argument("--source", default="api")
     g = sub.add_parser("show", help="작업 상세"); g.add_argument("id")
     pr = sub.add_parser("prio", help="우선순위 변경"); pr.add_argument("id"); pr.add_argument("priority", type=int)
     dc = sub.add_parser("discard", help="작업 폐기"); dc.add_argument("id")
+    pg = sub.add_parser("purge", help="작업 영구 삭제(복구 불가)"); pg.add_argument("id")
+    sub.add_parser("clear", help="종료된 작업(완료/검토/폐기) 영구 삭제")
     pa = sub.add_parser("pause", help="진행 중 작업 일시중지(사용자)"); pa.add_argument("id")
     re_ = sub.add_parser("resume", help="일시중지 작업 재개 허용"); re_.add_argument("id")
     rt = sub.add_parser("retry", help="검토 필요 작업을 다시 대기열에 올림"); rt.add_argument("id")
@@ -72,7 +77,8 @@ def _cmd_queue(argv: list[str]) -> int:
         elif args.action == "submit":
             from .safety import BlockedPayloadError
             try:
-                t = mgr.submit(args.prompt, source=args.source, priority=args.priority, kind=args.kind)
+                t = mgr.submit(args.prompt, source=args.source, priority=args.priority,
+                               kind=args.kind, depth=args.depth)
             except BlockedPayloadError as e:
                 print(f"차단됨(안전망): {e.reason}")
                 return 3
@@ -97,6 +103,13 @@ def _cmd_queue(argv: list[str]) -> int:
         elif args.action == "discard":
             t = mgr.discard(resolve_task_id(store, args.id))
             print(f"폐기됨: {t.id[:8]} → {t.state}")
+        elif args.action == "purge":
+            tid = resolve_task_id(store, args.id)
+            ok = mgr.purge(tid)
+            print(f"영구 삭제됨: {tid[:8]}" if ok else "대상 없음")
+        elif args.action == "clear":
+            n = mgr.clear_history()
+            print(f"종료된 작업 {n}건 영구 삭제됨")
         elif args.action == "pause":
             t = mgr.pause(resolve_task_id(store, args.id))
             print(f"일시중지됨: {t.id[:8]} → {t.state}")
@@ -187,32 +200,47 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_tui(argv[1:])
         if argv[0] == "doctor":
             return _cmd_doctor(argv[1:])
-    # 무인자 `alphred` = 전용 Alphred TUI(기획 §13). Hermes 직접 진입은 `alphred chat`.
+        if argv[0] == "prompt":
+            return _cmd_prompt(argv[1:])
+        if argv[0] == "tune":
+            return _cmd_tune(argv[1:])
+        if argv[0] == "keys":
+            return _cmd_keys(argv[1:])
+        if argv[0] == "connect":
+            return _cmd_connect(argv[1:])
+        if argv[0] == "service":
+            return _cmd_service(argv[1:])
+    # `alphred chat` 은 제거됨 — 순정 Hermes TUI 는 `hermes` 로 직접 실행한다.
+    # (Hermes 에 chat 서브커맨드가 없어 'chat' 토큰을 그대로 넘기면 오해석되므로 명시 안내.)
+    if argv and argv[0] == "chat":
+        sys.stderr.write("alphred: `alphred chat` 은 제거되었습니다. "
+                         "순정 Hermes TUI 가 필요하면 `hermes` 를 실행하세요.\n")
+        return 2
+    # 무인자 `alphred` = 전용 Alphred TUI(기획 §13).
     if not argv or argv == ["--no-daemon"]:
         return _cmd_tui(["--no-daemon"] if argv == ["--no-daemon"] else [])
     # 그 외 전부 Hermes 로 위임
     return _delegate_to_hermes(argv)
 
 
-def _ensure_daemon() -> None:
-    """:8643 Alphred 서비스가 안 떠 있으면 백그라운드로 자동 기동(best-effort)."""
+def _ensure_daemon():
+    """:8643 Alphred 서비스를 보장한다.
+
+    이미 떠 있으면(예: 사용자가 직접 `alphred serve` 실행) None 을 반환해 건드리지 않는다.
+    안 떠 있으면 **창 없이** TUI 수명에 묶인 자식으로 기동하고 그 Popen 을 반환한다 →
+    호출자(_cmd_tui)가 TUI 종료 시 함께 정리한다. best-effort(실패해도 None).
+    """
     try:
         import httpx
+        from .childproc import spawn_managed
         cfg = Config.load()
         try:
             if httpx.get(f"{cfg.gateway_url}/", timeout=2.0).status_code < 500:
-                return  # 이미 가동 중
+                return None  # 이미 가동 중 — 우리가 띄운 게 아니므로 정리 대상 아님
         except Exception:
             pass
-        import subprocess
-        log = open(cfg.alphred_home / "serve.log", "ab")
-        kwargs = {"stdout": log, "stderr": log, "stdin": subprocess.DEVNULL}
-        if os.name == "nt":
-            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP → TUI 와 독립
-            kwargs["creationflags"] = 0x00000008 | 0x00000200
-        else:
-            kwargs["start_new_session"] = True
-        subprocess.Popen([sys.executable, "-m", "alphred.cli", "serve"], **kwargs)
+        proc = spawn_managed([sys.executable, "-m", "alphred.cli", "serve"],
+                             log_path=cfg.alphred_home / "serve.log")
         sys.stderr.write("alphred: 백그라운드 큐 서비스를 시작하는 중...\n")
         # :8643 준비를 잠시 대기 → 첫 메시지부터 라우팅 훅이 살아있도록(기획 Fix B).
         # serve 는 Hermes 준비를 블로킹하지 않으므로 보통 1~2초면 뜬다.
@@ -231,21 +259,44 @@ def _ensure_daemon() -> None:
         else:
             sys.stderr.write("alphred: 큐 준비가 지연됩니다 (채팅은 정상; 큐는 곧 활성화). "
                              "끄려면 ALPHRED_NO_DAEMON=1 또는 `alphred --no-daemon`.\n")
+        return proc
     except Exception:
-        pass  # 데몬 기동 실패가 TUI 진입을 막지 않도록
+        return None  # 데몬 기동 실패가 TUI 진입을 막지 않도록
 
 
 def _cmd_setup(argv: list[str]) -> int:
     import argparse
 
+    from .config import PROFILES, read_profile, set_profile
+
     p = argparse.ArgumentParser(
         prog="alphred setup",
-        description="Alphred 초기 설정 — Hermes(LLM provider 등) 온보딩. Hermes 는 순정 유지(브랜딩 안 함).")
+        description="Alphred 초기 설정 — Hermes(LLM provider 등) 온보딩 + 프로파일 선택. "
+                    "Hermes 는 순정 유지(브랜딩 안 함).")
     p.add_argument("--no-launch", action="store_true",
                    help="Hermes 온보딩에 진입하지 않고 안내만")
+    p.add_argument("--profile", choices=PROFILES, default=None,
+                   help="§35.4 프리셋 영구 설정 — basic(큐/선점/검증만) · "
+                        "smart(+의도판정·계획, 권장) · full(+질문·스텝실행·감시)")
     args = p.parse_args(argv)
 
     cfg = Config.load()
+    # §35.4 프로파일 — 플래그로 지정하거나, 대화형(TTY)에서 미설정이면 1회 질문.
+    if args.profile:
+        set_profile(cfg.alphred_home, args.profile)
+        print(f"프로파일 설정됨: {args.profile}  (변경: alphred setup --profile <이름>)")
+    elif read_profile(cfg.alphred_home) is None and sys.stdin.isatty():
+        print("Alphred 동작 프로파일을 고르세요 (나중에 `alphred setup --profile` 로 변경):")
+        print("  1) basic — 큐/선점/검증만 (LLM 보조 호출 최소)")
+        print("  2) smart — + LLM 의도 판정·실행 계획 (권장, 질문 없음)")
+        print("  3) full  — + 착수 전 확인 질문·스텝 단위 실행·실행 감시")
+        try:
+            pick = input("선택 [2]: ").strip() or "2"
+        except EOFError:
+            pick = "2"
+        name = {"1": "basic", "2": "smart", "3": "full"}.get(pick, "smart")
+        set_profile(cfg.alphred_home, name)
+        print(f"프로파일 설정됨: {name}")
     if not cfg.hermes_bin:
         sys.stderr.write(
             "alphred: hermes 실행 파일을 찾을 수 없습니다. "
@@ -254,11 +305,129 @@ def _cmd_setup(argv: list[str]) -> int:
 
     # 새 컨셉(§15): Alphred 는 Hermes 를 브랜딩하지 않는다(순정 유지). 정체성은 전용 TUI 가 담당.
     print("Alphred 설정: Hermes 는 순정 그대로 둡니다(스킨/정체성/훅 미설치).")
+    print("다기기 접속: 서버에서 `alphred keys issue <기기이름>` → 기기에서 "
+          "`alphred connect <서버URL> --key <키>`.")
     if args.no_launch:
-        print("준비 완료. 큐 결합 대화는 `alphred`, 순수 Hermes 는 `hermes`(또는 `alphred chat`).")
+        print("준비 완료. 큐 결합 대화는 `alphred`, 순수 Hermes 는 `hermes`. 점검: `alphred doctor`.")
         return 0
     print("Hermes 온보딩으로 진입합니다… (LLM provider 등 설정)")
     return _delegate_to_hermes([])
+
+
+def _cmd_prompt(argv: list[str]) -> int:
+    """백그라운드 실행 하네스(시스템 프롬프트, §26) 보기/경로/편집본 생성."""
+    import argparse
+    from . import prompt as _prompt
+
+    p = argparse.ArgumentParser(
+        prog="alphred prompt",
+        description="실행 하네스 관리 — 기본=백그라운드 Heavy(시스템 프롬프트), --light=즉답(Light) 하네스")
+    p.add_argument("--light", action="store_true",
+                   help="대상을 Light(즉답) 하네스로 — §29.2, 동기 응답 품질")
+    p.add_argument("--show", action="store_true", help="현재 적용 중인 하네스 전문 출력")
+    p.add_argument("--path", action="store_true", help="적용 중인 소스(편집본/기본) 경로 표시")
+    p.add_argument("--init", action="store_true",
+                   help="기본 하네스를 ALPHRED_HOME 의 편집본으로 복사(편집 시작점)")
+    p.add_argument("--force", action="store_true", help="--init 시 기존 편집본 덮어쓰기")
+    args = p.parse_args(argv)
+
+    cfg = Config.load()
+    light = args.light
+    label = "Light(즉답) 하네스" if light else "백그라운드 실행 하네스(시스템 프롬프트)"
+    user_path = (_prompt.user_light_prompt_path(cfg.alphred_home) if light
+                 else _prompt.user_prompt_path(cfg.alphred_home))
+    using_user = user_path.exists()
+    _init = _prompt.init_user_light_prompt if light else _prompt.init_user_prompt
+    _load = (lambda h: _prompt.load_light_harness(h)) if light else _prompt.load_harness
+
+    if args.init:
+        path, wrote = _init(cfg.alphred_home, overwrite=args.force)
+        if wrote:
+            print(f"편집용 {label} 를 생성했습니다: {path}")
+            scope = "동기 Light 응답" if light else "이후 모든 Heavy 작업"
+            print(f"이 파일을 수정하면 {scope}에 반영됩니다(데몬 재기동 필요).")
+        else:
+            print(f"이미 편집본이 있습니다: {path}  (덮어쓰려면 --force)")
+        return 0
+    if args.path:
+        print(f"대상: {label}")
+        print(f"적용 소스: {'사용자 편집본' if using_user else '패키지 기본값'}")
+        print(f"편집본 경로: {user_path}  ({'존재' if using_user else '없음 — --init 로 생성'})")
+        return 0
+    if args.show:
+        print(_load(cfg.alphred_home))
+        return 0
+    # 기본: 요약
+    print(label)
+    if light:
+        print(f"  활성(ALPHRED_LIGHT_HARNESS): {'ON' if cfg.light_harness else 'OFF'}")
+    print(f"  적용 소스: {'사용자 편집본' if using_user else '패키지 기본값'}")
+    print(f"  편집본 경로: {user_path}")
+    print("  명령: [--light] --show(전문) · --path(경로) · --init(편집본 생성) [--force]")
+    return 0
+
+
+def _cmd_tune(argv: list[str]) -> int:
+    """§29.3 Hermes 설정 품질 감사·적용 — 보고서 #1/#2/#4/#5 완화(코어 무수정, 백업·원복)."""
+    import argparse
+
+    from . import tune as _tune
+
+    p = argparse.ArgumentParser(
+        prog="alphred tune",
+        description="Hermes config 품질 감사(기본=읽기전용). --apply 로 동의 적용, --revert 로 원복.")
+    p.add_argument("--apply", nargs="*", metavar="ID", default=None,
+                   help="권장 설정 적용(인자 없으면 적용 가능한 전부, 또는 knob id 나열). 백업 생성.")
+    p.add_argument("--revert", action="store_true", help="tune 백업으로 config.yaml 원복")
+    p.add_argument("--json", action="store_true", help="감사 결과를 JSON 으로 출력")
+    args = p.parse_args(argv)
+    cfg = Config.load()
+
+    if args.revert:
+        ok = _tune.revert(cfg)
+        print("원복 완료(config.yaml 백업 복원)." if ok else "원복할 tune 백업이 없습니다.")
+        return 0 if ok else 1
+
+    if args.apply is not None:
+        ids = args.apply or None
+        res = _tune.apply(cfg, ids)
+        print(f"적용: {', '.join(res['applied']) or '(없음 — 이미 권장값이거나 키 부재)'}")
+        if res["skipped"]:
+            print(f"건너뜀: {', '.join(res['skipped'])}")
+        print(f"백업: {res['backup']}")
+        print("데몬 재기동 후 반영됩니다(Hermes 게이트웨이가 config 를 다시 읽음).")
+        return 0
+
+    rep = _tune.audit(cfg)
+    if args.json:
+        import json
+        print(json.dumps(rep, ensure_ascii=False, indent=2))
+        return 0
+    print("Hermes 설정 품질 감사 (보고서 5대 원인 중 설정으로 완화 가능한 것)\n")
+    print(f"  {'원인':4} {'항목':18} {'현재':>10}  {'권장':>8}  상태")
+    print("  " + "-" * 70)
+    for r in rep["rows"]:
+        cur = "(없음)" if r["current"] is None else str(r["current"])
+        rec = "자문" if r["advisory"] else str(r["recommended"])
+        if r["advisory"]:
+            status = "ℹ 자문(키 필요)"
+        elif r["action"]:
+            status = "⚠ 권장과 다름"
+        else:
+            status = "✓ 양호"
+        print(f"  {r['cause']:4} {r['label']:18} {cur:>10}  {rec:>8}  {status}")
+        print(f"       └ {r['why']}")
+    if rep["aux_overrides"]:
+        print("\n  #2 보조모델 수동 지정 감지(약한 모델이면 압축·요약 품질 저하 위험):")
+        for o in rep["aux_overrides"]:
+            print(f"     auxiliary.{o['slot']}.model = {o['model']}")
+    else:
+        print("\n  #2 보조모델: 전부 auto(메인 모델 사용) — 양호.")
+    actionable = [r["id"] for r in rep["rows"] if r["action"]]
+    print("\n  적용: alphred tune --apply" + (f"   (대상: {', '.join(actionable)})" if actionable
+                                            else "   (적용할 변경 없음)"))
+    print("  원복: alphred tune --revert")
+    return 0
 
 
 def _cmd_doctor(argv: list[str]) -> int:
@@ -268,9 +437,11 @@ def _cmd_doctor(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="alphred doctor",
                                 description="Alphred/Hermes 런타임 상태 일괄 점검(관측성)")
     p.add_argument("--json", action="store_true", help="JSON 으로 출력")
+    p.add_argument("--deep", action="store_true",
+                   help="§35.4 Hermes 프리미티브 라이브 스모크(run 생성/완주/중단 — 소량 LLM 사용)")
     args = p.parse_args(argv)
     cfg = Config.load()
-    report = _collect_doctor(cfg)
+    report = _collect_doctor(cfg, deep=args.deep)
     if args.json:
         import json
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -279,8 +450,47 @@ def _cmd_doctor(argv: list[str]) -> int:
     return 0 if report["ok"] else 1
 
 
-def _collect_doctor(cfg: Config) -> dict:
-    """런타임 상태를 수집한다(라이브 LLM 호출 없음 — 쿼터 보호)."""
+def _deep_smoke(cfg: Config) -> list[tuple[str, bool, str]]:
+    """§35.4 doctor --deep — Hermes 프리미티브 라이브 스모크(옵트인, 소량 LLM).
+
+    Phase 0 PoC(runs 생성/완주/중단)의 축약판 — 새 Hermes 버전 호환성 검증 절차.
+    """
+    import time as _t
+
+    from .gateway import _upstream_key
+    from .hermes_client import HermesClient, run_outcome
+    out: list[tuple[str, bool, str]] = []
+    key = cfg.api_key or _upstream_key(cfg)
+    c = HermesClient(cfg.api_base_url, key, timeout=30.0)
+    try:
+        ok = c.health()
+        out.append(("deep: /models 인증", ok, "OK" if ok else "미가동/키 불일치"))
+        if not ok:
+            return out
+        rid = c.start_run("Reply with exactly: OK")
+        out.append(("deep: POST /runs", bool(rid), str(rid)))
+        status = "?"
+        for _ in range(60):                       # 최대 ~2분 폴링
+            status = (c.get_run(rid) or {}).get("status")
+            if run_outcome(status) in ("done", "failed", "cancelled"):
+                break
+            _t.sleep(2)
+        out.append(("deep: run 완주", run_outcome(status) == "done", f"status={status}"))
+        rid2 = c.start_run("Count slowly from 1 to 50, one number per line.")
+        _t.sleep(1)
+        c.stop_run(rid2)
+        _t.sleep(2)
+        st2 = (c.get_run(rid2) or {}).get("status")
+        out.append(("deep: /runs/{id}/stop", run_outcome(st2) != "running", f"status={st2}"))
+    except Exception as e:
+        out.append(("deep: 예외", False, f"{type(e).__name__}: {e}"))
+    finally:
+        c.close()
+    return out
+
+
+def _collect_doctor(cfg: Config, deep: bool = False) -> dict:
+    """런타임 상태를 수집한다(기본은 라이브 LLM 호출 없음 — 쿼터 보호. --deep 만 예외)."""
     import httpx
 
     def _ping(url: str) -> dict:
@@ -304,6 +514,13 @@ def _collect_doctor(cfg: Config) -> dict:
     rep["hermes_api"] = h
     add("Hermes API (:8642)", h["up"],
         f"{cfg.api_base_url} → {'응답' if h['up'] else h.get('error') or h.get('status')}")
+    # 2b) --deep: Hermes 프리미티브 라이브 스모크(§35.4, 옵트인)
+    if deep:
+        if h["up"]:
+            for name, ok, detail in _deep_smoke(cfg):
+                add(name, ok, detail)
+        else:
+            add("deep 스모크", False, "Hermes API 미가동 — 건너뜀")
     # 3) Alphred 게이트웨이 (:8643)
     g = _ping(f"{cfg.gateway_url}/")
     rep["gateway"] = g
@@ -311,20 +528,82 @@ def _collect_doctor(cfg: Config) -> dict:
         f"{cfg.gateway_url} → {'응답' if g['up'] else g.get('error') or g.get('status')}")
     # 4) 모델/provider (config 읽기 — 호출 없음)
     try:
-        from .gateway import _read_model_cfg
-        mc = _read_model_cfg(cfg)
+        from .config import read_model_config
+        mc = read_model_config(cfg.hermes_home)
         model = mc.get("default") or "(미설정)"
         provider = mc.get("provider") or (model.split("/")[0] if "/" in model else "?")
         rep["model"] = {"default": mc.get("default"), "provider": mc.get("provider")}
         add("모델/provider", bool(mc.get("default")), f"{model}  (provider={provider})")
     except Exception as e:
         add("모델/provider", False, f"config 읽기 실패: {e}")
+    # 4b) depth별 모델 라우팅(§29.1) — 설정 시에만 의미
+    try:
+        tiers = cfg.get_tiers()
+        rep["model_tiers"] = tiers
+        if cfg.has_model_tiers():
+            def _lbl(t):
+                v = tiers.get(t)
+                return v.get("model") if isinstance(v, dict) else "(base)"
+            add("depth별 모델(§29.1)", True,
+                f"high={_lbl('high')} · mid={_lbl('mid')} · low={_lbl('low')} "
+                f"· base={tiers.get('base') or '?'}")
+        else:
+            add("depth별 모델(§29.1)", True, "미설정(단일 모델) — /model high|mid|low <이름> 으로 설정")
+    except Exception as e:
+        add("depth별 모델(§29.1)", True, f"읽기 실패: {e}")
     # 5) 플래너/LLM 분류 플래그
     add("플래너(ALPHRED_PLANNER)", True, "ON" if cfg.planner else "OFF")
     add("LLM 분류(ALPHRED_LLM_CLASSIFY)", True, "ON" if cfg.llm_classify else "OFF")
     add("산출물 검증(ALPHRED_VERIFY)", True, "ON (Tier0 결정적)" if cfg.verify else "OFF")
     add("수용 judge(ALPHRED_JUDGE)", True,
         f"ON (Tier2 LLM, high, 재시도≤{cfg.judge_max_retries})" if cfg.judge else "OFF (쿼터 절약)")
+    add("Light 하네스(ALPHRED_LIGHT_HARNESS)", True,
+        "ON (즉답 품질 시스템 메시지)" if cfg.light_harness else "OFF (순정 패스스루)")
+    add("MoA(ALPHRED_MOA)", True,
+        f"ON (high 한정, 표본≤{cfg.moa_samples})" if cfg.moa else "OFF (단일 모델 직관)")
+    add("프로파일(ALPHRED_PROFILE)", True,
+        f"{cfg.profile} — basic(큐만)/smart(+의도·계획)/full(+질문·스텝·감시), "
+        f"변경: alphred setup --profile <이름>")
+    add("IntentCard(ALPHRED_INTENT)", True,
+        "ON (LLM-first 의도 판정)" if cfg.intent else "OFF (정규식 사전필터)")
+    add("인테이크 질문(ALPHRED_CLARIFY)", True,
+        (f"ON (추천답변 질문, 타임아웃 {cfg.clarify_timeout:.0f}s)" if cfg.clarify and cfg.intent
+         else "ON (IntentCard OFF — 무효)" if cfg.clarify
+         else "OFF (질문 없이 가정 진행)"))
+    add("StepRunner(ALPHRED_ORCHESTRATE)", True,
+        (f"ON (high 한정 스텝 실행 · 예산 {cfg.task_budget}run · 스텝 재시도≤{cfg.step_retries})"
+         if cfg.orchestrate else "OFF (단발 실행)"))
+    add("watchdog(ALPHRED_WATCHDOG)", True,
+        (f"ON (연속 도구실패≥{cfg.tool_fail_limit} · 무진전 {cfg.stall_seconds:.0f}s → 중단·교정)"
+         if cfg.watchdog else "OFF (실행 중 무개입)"))
+    # 5b) 능력 레지스트리(§34.5) — 로컬 프로브(CLI/라이브러리)는 항상, 스킬/툴셋은 :8642 필요
+    if cfg.caps:
+        try:
+            from .capabilities import CapabilityRegistry
+            from .hermes_client import HermesClient as _HC
+            _c = _HC(cfg.api_base_url, cfg.api_key, timeout=5.0) if h["up"] else None
+            try:
+                caps = CapabilityRegistry(cfg, _c)
+                s = caps.summary()
+            finally:
+                if _c is not None:
+                    _c.close()
+            rep["capabilities"] = s["counts"]
+            fmts = s.get("formats") or {}
+            capable = [f for f, v in fmts.items() if v.get("capable")]
+            nocap = [f for f, v in fmts.items() if not v.get("capable")]
+            cnt = s["counts"]
+            detail = (f"스킬 {cnt['skills']} · 도구 {cnt['tools']} · CLI {cnt['cli_agents']} "
+                      f"· 라이브러리 {cnt['pylibs']} · MCP {cnt['mcp_servers']}")
+            if capable:
+                detail += " · 생성가능 " + ",".join(sorted(capable))
+            if nocap:
+                detail += " · 불가 " + ",".join(sorted(nocap))
+            add("능력 레지스트리(§34.5)", True, detail)
+        except Exception as e:
+            add("능력 레지스트리(§34.5)", True, f"수집 불가: {e}")
+    else:
+        add("능력 레지스트리(§34.5)", True, "OFF (ALPHRED_CAPS=0 — 정적 하네스)")
     # 6) 큐 상태 (게이트웨이 가동 시) / DB 직접
     counts: dict = {}
     if g["up"]:
@@ -356,6 +635,7 @@ def _collect_doctor(cfg: Config) -> dict:
         store = Store(cfg.db_path)
         try:
             rows = store.list()
+            intent_stats = store.intent_stats()
         finally:
             store.close()
         completed = sum(1 for t in rows if t.state == "Completed")
@@ -387,6 +667,25 @@ def _collect_doctor(cfg: Config) -> dict:
         if scores:
             detail += f" · judge 평균 {sum(scores) / len(scores):.0f}"
         add("검증 통계(§21)", True, detail)
+        # 7b) §34.7 지표 — 의도/인테이크/오케스트레이션 품질 지표(무LLM)
+        m = _collect_metrics(rows, intent_stats)
+        rep["metrics"] = m
+        bits = []
+        if m["classified"]:
+            bits.append(f"분류 {m['classified']}건"
+                        + (f"(명시 오버라이드 {m['explicit_ratio']:.0%})"
+                           if m["explicit_ratio"] is not None else ""))
+        if m["needs_review_rate"] is not None:
+            bits.append(f"NeedsReview율 {m['needs_review_rate']:.0%}")
+        if m["asked"] :
+            bits.append(f"질문율 {m['ask_rate']:.0%}"
+                        + (f" · 추천 채택률 {m['recommend_adopt_rate']:.0%}"
+                           if m["recommend_adopt_rate"] is not None else ""))
+        if m["orchestrated"]:
+            bits.append(f"오케스트레이션 {m['orchestrated']}건 · 평균 {m['avg_runs']:.1f}run"
+                        + (f" · 스텝 1회 통과율 {m['step_first_pass_rate']:.0%}"
+                           if m["step_first_pass_rate"] is not None else ""))
+        add("지표(§34.7)", True, " · ".join(bits) or "(데이터 없음)")
     except Exception as e:
         add("검증 통계(§21)", True, f"집계 불가: {e}")
     # 8) 안전망(재시작 가드)
@@ -398,6 +697,68 @@ def _collect_doctor(cfg: Config) -> dict:
     except Exception as e:
         add("안전망(#30719)", False, str(e))
     return rep
+
+
+def _collect_metrics(rows, intent_stats: dict) -> dict:
+    """§34.7 지표 — DB 집계만으로 계산(무LLM, 순수 함수).
+
+    · classified/explicit_ratio: intent_log 총 판정 수와 명시 오버라이드 비율(암묵 정답 신호)
+    · needs_review_rate: 종료(Completed+NeedsReview) 대비 NeedsReview 비율
+    · ask_rate/recommend_adopt_rate: Heavy 중 질문 발생률 · 답변이 추천(✦)과 일치한 비율
+    · orchestrated/avg_runs/step_first_pass_rate: 스텝 실행 작업 수·평균 run·스텝 1회 통과율
+    """
+    import json as _json
+
+    total_cls = sum(sum(v.values()) for v in (intent_stats or {}).values())
+    explicit = sum((intent_stats or {}).get("explicit", {}).values())
+    completed = sum(1 for t in rows if t.state == "Completed")
+    needs = sum(1 for t in rows if t.state == "NeedsReview")
+    finished = completed + needs
+    heavy = [t for t in rows if t.kind == "heavy"]
+    asked = adopt_hit = adopt_total = 0
+    orch_runs: list[int] = []
+    first_pass = step_retried = 0
+    for t in heavy:
+        qs, ans, plan = [], None, None
+        try:
+            qs = _json.loads(t.questions) if getattr(t, "questions", None) else []
+            ans = _json.loads(t.answers) if getattr(t, "answers", None) else None
+            plan = _json.loads(t.plan) if getattr(t, "plan", None) else None
+        except Exception:
+            pass
+        if qs:
+            asked += 1
+            if isinstance(ans, list):
+                recs = [next((o.get("label") for o in (q.get("options") or [])
+                              if o.get("recommended")), None) for q in qs]
+                for i, a in enumerate(ans):
+                    label = a.get("answer") if isinstance(a, dict) else a
+                    if i < len(recs) and recs[i]:
+                        adopt_total += 1
+                        if str(label).strip() == str(recs[i]).strip():
+                            adopt_hit += 1
+        steps = (plan or {}).get("steps") or []
+        if steps and any("state" in s for s in steps):
+            orch_runs.append(int((plan or {}).get("runs_used") or 0))
+            for s in steps:
+                if s.get("state") == "done":
+                    if int(s.get("attempts") or 0) > 0:
+                        step_retried += 1
+                    else:
+                        first_pass += 1
+    step_done = first_pass + step_retried
+    return {
+        "classified": total_cls,
+        "explicit_ratio": (explicit / total_cls) if total_cls else None,
+        "intent_engines": intent_stats or {},
+        "needs_review_rate": (needs / finished) if finished else None,
+        "asked": asked,
+        "ask_rate": (asked / len(heavy)) if heavy else 0.0,
+        "recommend_adopt_rate": (adopt_hit / adopt_total) if adopt_total else None,
+        "orchestrated": len(orch_runs),
+        "avg_runs": (sum(orch_runs) / len(orch_runs)) if orch_runs else 0.0,
+        "step_first_pass_rate": (first_pass / step_done) if step_done else None,
+    }
 
 
 def _auth_headers(cfg: Config) -> dict:
@@ -425,12 +786,177 @@ def _cmd_tui(argv: list[str]) -> int:
     except Exception as e:
         sys.stderr.write(
             f"alphred: TUI 의존성을 불러올 수 없습니다 ({e}). `pip install textual` 후 다시 시도하세요.\n"
-            "  (또는 `alphred chat` 으로 Hermes TUI 를 쓰거나 `alphred queue list` 로 큐를 확인하세요.)\n")
+            "  (또는 `hermes` 로 순정 Hermes TUI 를 쓰거나 `alphred queue list` 로 큐를 확인하세요.)\n")
         return 1
     cfg = Config.load()
+    proc = None
     if not no_daemon and "ALPHRED_NO_DAEMON" not in os.environ:
-        _ensure_daemon()  # :8643 Alphred 서비스 보장(없으면 백그라운드 기동)
-    run_tui(cfg.gateway_url, cfg.api_key, cfg.alphred_home)
+        proc = _ensure_daemon()  # :8643 보장. 우리가 띄웠을 때만 핸들 반환(정리 대상)
+    try:
+        run_tui(cfg.gateway_url, cfg.api_key, cfg.alphred_home)
+    finally:
+        if proc is not None:
+            from .childproc import terminate_managed
+            terminate_managed(proc)  # TUI 종료(정상/예외) 시 serve+hermes 트리 정리
+    return 0
+
+
+def _cmd_keys(argv: list[str]) -> int:
+    """클라이언트(디바이스) 키 관리(§35.1) — 기기당 1개 발급 권장(회수 단위 = 기기)."""
+    import argparse
+
+    from . import clientkeys
+    p = argparse.ArgumentParser(prog="alphred keys", description="디바이스 접속 키 관리")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    pi = sub.add_parser("issue", help="새 키 발급(평문은 지금 한 번만 표시)")
+    pi.add_argument("name", help="기기 이름 (예: 노트북, web, esp32-거실)")
+    pi.add_argument("--scope", choices=clientkeys.SCOPES, default="control",
+                    help="read=모니터링 전용(GET만) / control=전부 (기본)")
+    sub.add_parser("list", help="키 목록(평문 없음)")
+    pr = sub.add_parser("revoke", help="키 회수(즉시 무효)")
+    pr.add_argument("name")
+    a = p.parse_args(argv)
+    cfg = Config.load()
+    if a.cmd == "issue":
+        try:
+            key = clientkeys.issue(cfg.alphred_home, a.name, a.scope)
+        except ValueError as e:
+            print(f"오류: {e}")
+            return 2
+        print(f"발급됨: {a.name}  (scope={a.scope})")
+        print(f"\n  {key}\n")
+        print("  ↑ 이 키는 지금 한 번만 표시됩니다(서버에는 해시만 저장). 기기에 보관하세요.")
+        print("  기기에서 사용: `alphred connect <서버URL> --key <키>` 또는")
+        print("  HTTP 헤더 `Authorization: Bearer <키>` / 환경변수 ALPHRED_API_KEY")
+        return 0
+    if a.cmd == "list":
+        rows = clientkeys.list_keys(cfg.alphred_home)
+        if not rows:
+            print("(발급된 키 없음 — 키가 하나라도 생기면 인증이 필수가 됩니다)")
+            return 0
+        for r in rows:
+            print(f"  {r['name']:<20} scope={r['scope']:<8} 발급 {r['created_at']}"
+                  f"  마지막 사용 {r['last_seen'] or '-'}")
+        return 0
+    ok = clientkeys.revoke(cfg.alphred_home, a.name)
+    print(f"회수됨: {a.name}" if ok else f"없음: {a.name}")
+    return 0 if ok else 1
+
+
+def _cmd_connect(argv: list[str]) -> int:
+    """씬클라이언트 TUI(§35.9 모드 b) — 원격 Alphred 서버 접속. 로컬 데몬을 절대 띄우지 않는다."""
+    import argparse
+    p = argparse.ArgumentParser(prog="alphred connect",
+                                description="원격 Alphred 서버에 TUI 로 접속(씬클라이언트)")
+    p.add_argument("url", help="서버 주소 (예: 192.168.0.10:8643, http://myhost:8643)")
+    p.add_argument("--key", default=None, help="접속 키(미지정 시 ALPHRED_API_KEY 환경변수)")
+    a = p.parse_args(argv)
+    url = a.url.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    key = a.key or os.environ.get("ALPHRED_API_KEY") or os.environ.get("API_SERVER_KEY")
+    import httpx
+    try:  # 접속/인증을 TUI 진입 전에 검증 — 실패는 명확한 에러(로컬 폴백 없음)
+        r = httpx.get(f"{url}/queue", timeout=5.0,
+                      headers={"Authorization": f"Bearer {key}"} if key else {})
+    except Exception as e:
+        sys.stderr.write(
+            f"alphred: 서버에 연결할 수 없습니다: {url} ({type(e).__name__})\n"
+            "  서버에서 `alphred serve --host 0.0.0.0` 가동·포트·방화벽을 확인하세요.\n")
+        return 2
+    if r.status_code == 401:
+        sys.stderr.write(
+            "alphred: 인증 실패(401) — 서버에서 `alphred keys issue <기기이름>` 으로 키를\n"
+            "  발급받아 `--key` 또는 ALPHRED_API_KEY 로 전달하세요.\n")
+        return 2
+    if r.status_code >= 500:
+        sys.stderr.write(f"alphred: 서버 오류(HTTP {r.status_code}) — 서버 로그를 확인하세요.\n")
+        return 2
+    try:
+        from .tui import run_tui
+    except Exception as e:
+        sys.stderr.write(f"alphred: TUI 의존성을 불러올 수 없습니다 ({e}).\n")
+        return 1
+    cfg = Config.load()
+    sys.stderr.write(f"alphred: {url} 에 접속합니다 (세션 기록은 이 기기에 보관).\n")
+    run_tui(url, key, cfg.alphred_home)   # 세션=기기 로컬, 큐/실행=서버(단일 코어)
+    return 0
+
+
+def _cmd_service(argv: list[str]) -> int:
+    """OS 서비스 등록(§35.4) — 로그온 시 `alphred serve` 자동 기동.
+
+    Windows 는 작업 스케줄러(schtasks)로 직접 등록/해제하고, Linux/macOS 는 유닛 파일을
+    생성해 설치 명령을 안내한다(권한 필요 작업은 사용자 확인 하에).
+    플래그(ALPHRED_PROFILE 등)는 파일 기반 설정이므로 서비스에서도 그대로 반영된다.
+    """
+    import argparse
+    import platform
+    import subprocess
+    p = argparse.ArgumentParser(prog="alphred service")
+    p.add_argument("action", choices=("install", "uninstall", "status"))
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", default="8643")
+    a = p.parse_args(argv)
+    cfg = Config.load()
+    sysname = platform.system()
+    task_name = "AlphredServe"
+    if sysname == "Windows":
+        if a.action == "install":
+            tr = f'"{sys.executable}" -m alphred.cli serve --host {a.host} --port {a.port}'
+            r = subprocess.run(["schtasks", "/Create", "/TN", task_name, "/TR", tr,
+                                "/SC", "ONLOGON", "/F"], capture_output=True, text=True)
+            print((r.stdout or r.stderr).strip())
+            if r.returncode == 0:
+                print(f"등록됨 — 지금 시작: schtasks /Run /TN {task_name}")
+            return r.returncode
+        if a.action == "uninstall":
+            r = subprocess.run(["schtasks", "/Delete", "/TN", task_name, "/F"],
+                               capture_output=True, text=True)
+            print((r.stdout or r.stderr).strip())
+            return r.returncode
+        r = subprocess.run(["schtasks", "/Query", "/TN", task_name],
+                           capture_output=True, text=True)
+        print((r.stdout or r.stderr).strip())
+        return r.returncode
+    # Linux/macOS — 유닛/plist 파일 생성 + 설치 안내(권한 작업은 수동)
+    if sysname == "Linux":
+        unit = (f"[Unit]\nDescription=Alphred agent server\nAfter=network.target\n\n"
+                f"[Service]\nExecStart={sys.executable} -m alphred.cli serve "
+                f"--host {a.host} --port {a.port}\nRestart=on-failure\n\n"
+                f"[Install]\nWantedBy=default.target\n")
+        path = cfg.alphred_home / "alphred.service"
+        if a.action == "install":
+            path.write_text(unit, encoding="utf-8")
+            print(f"유닛 파일 생성: {path}")
+            print("설치: mkdir -p ~/.config/systemd/user && "
+                  f"cp {path} ~/.config/systemd/user/ && "
+                  "systemctl --user enable --now alphred")
+        else:
+            print("해제: systemctl --user disable --now alphred / 상태: "
+                  "systemctl --user status alphred")
+        return 0
+    plist_path = cfg.alphred_home / "com.alphred.serve.plist"
+    if a.action == "install":
+        plist = (f'<?xml version="1.0" encoding="UTF-8"?>\n'
+                 f'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                 f'"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                 f'<plist version="1.0"><dict>\n'
+                 f'  <key>Label</key><string>com.alphred.serve</string>\n'
+                 f'  <key>ProgramArguments</key><array>\n'
+                 f'    <string>{sys.executable}</string><string>-m</string>'
+                 f'<string>alphred.cli</string><string>serve</string>'
+                 f'<string>--host</string><string>{a.host}</string>'
+                 f'<string>--port</string><string>{a.port}</string>\n'
+                 f'  </array>\n'
+                 f'  <key>RunAtLoad</key><true/>\n'
+                 f'</dict></plist>\n')
+        plist_path.write_text(plist, encoding="utf-8")
+        print(f"plist 생성: {plist_path}")
+        print(f"설치: cp {plist_path} ~/Library/LaunchAgents/ && "
+              "launchctl load ~/Library/LaunchAgents/com.alphred.serve.plist")
+    else:
+        print("해제: launchctl unload ~/Library/LaunchAgents/com.alphred.serve.plist")
     return 0
 
 
@@ -438,7 +964,8 @@ def _cmd_serve(argv: list[str]) -> int:
     import argparse
     from .gateway import serve
     p = argparse.ArgumentParser(prog="alphred serve", description="Alphred 게이트웨이 기동")
-    p.add_argument("--host", default="0.0.0.0")
+    # §35.1 안전 기본값: 로컬 전용. 외부/다기기 접속은 --host 0.0.0.0 + 접속 키 필수.
+    p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8643)
     p.add_argument("--interval", type=float, default=1.0, help="스케줄러 tick 주기(초)")
     p.add_argument("--no-auto-hermes", action="store_true",

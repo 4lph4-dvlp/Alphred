@@ -144,7 +144,7 @@ def test_autonomous_preamble_on_start(tmp_path):
     mgr.submit("리포트 작성", priority=5, kind="heavy")
     mgr.tick()
     sent = client.started[0][1]
-    assert "자율 백그라운드 작업" in sent and "리포트 작성" in sent
+    assert "autonomous background task" in sent.lower() and "리포트 작성" in sent
 
 
 def test_context_handoff_stored_and_sent(tmp_path):
@@ -160,7 +160,7 @@ def test_context_handoff_stored_and_sent(tmp_path):
 
 def test_result_needs_attention(tmp_path):
     """완료됐지만 되물음/실패한 결과를 사람 확인 필요로 판정(P4)."""
-    from alphred.queue_manager import result_needs_attention
+    from alphred.verify import result_needs_attention
     assert result_needs_attention("어떤 정보를 원하시는지 알려주세요") is True
     assert result_needs_attention("죄송합니다. 파일을 생성할 수 없습니다.") is True
     assert result_needs_attention("") is True
@@ -174,7 +174,7 @@ def test_result_needs_attention(tmp_path):
 
 def test_claimed_missing_files_detects_hallucinated_save(tmp_path):
     """write_file 을 실제 호출하지 않고 '저장했다'고 거짓 보고한 환각을 적발(P4 보강)."""
-    from alphred.queue_manager import claimed_missing_files, result_needs_attention
+    from alphred.verify import claimed_missing_files, result_needs_attention
     ghost = tmp_path / "US_Market_Summary.pdf"   # 만들지 않음
     msg = f"조사를 마쳤습니다. 보고서를 {ghost} 에 저장했습니다."
     assert claimed_missing_files(msg) == [str(ghost)]
@@ -209,7 +209,7 @@ def test_plan_to_depth():
 
 def test_verify_artifacts(tmp_path):
     """Tier0 결정적 검증: 누락/빈/형식불일치 적발, 유효 파일·산출물無는 통과."""
-    from alphred.queue_manager import verify_artifacts
+    from alphred.verify import verify_artifacts
     # 산출물 주장 없음 → 통과(단, checked=0 으로 '검증 안 함' 구분)
     rep = verify_artifacts("증시는 상승했습니다.")
     assert rep["passed"] is True and rep["checked"] == 0
@@ -230,7 +230,7 @@ def test_verify_artifacts(tmp_path):
 
 def test_verify_artifacts_flexible_detection(tmp_path):
     """유연성: 따옴표 경로·다양한 확장자·미등록 형식 graceful·비파일 작업 구분."""
-    from alphred.queue_manager import verify_artifacts, register_format
+    from alphred.verify import verify_artifacts, register_format
     # 따옴표로 감싼(공백 포함 가능) 경로도 탐지
     miss = tmp_path / "my report.csv"
     rep = verify_artifacts(f'결과를 "{miss}" 에 생성했습니다.')
@@ -251,7 +251,7 @@ def test_verify_artifacts_flexible_detection(tmp_path):
 
 def test_claimed_paths_excludes_urls(tmp_path):
     """URL(https://...)을 Windows 드라이브(s:/)로 오인하지 않는다(회귀)."""
-    from alphred.queue_manager import _claimed_file_paths, verify_artifacts
+    from alphred.verify import _claimed_file_paths, verify_artifacts
     assert _claimed_file_paths("자료 https://example.com/report.pdf 참고") == []
     keep = tmp_path / "r.pdf"
     got = _claimed_file_paths(f"보고서 {keep} 와 https://site/x.pdf 참조")
@@ -342,8 +342,8 @@ def test_parse_verdict():
 
 
 def test_autonomous_input_injects_feedback():
-    from alphred.queue_manager import _autonomous_input
-    s = _autonomous_input("원요청", None, "- X 누락\n- Y 부족")
+    from alphred.prompt import autonomous_input
+    s = autonomous_input("원요청", None, "- X 누락\n- Y 부족")
     assert "X 누락" in s and "보완" in s and "원요청" in s
 
 
@@ -445,6 +445,22 @@ def test_classify_real_heavy_still_heavy():
               "분석 작업 진행해줘"]:
         kind, _p, _r = classifier.classify(q, source="tui")
         assert kind == TaskKind.HEAVY.value, (q, kind)
+
+
+def test_classify_skill_install_routes_heavy():
+    """스킬/패키지 설치·활성화류는 느린 관리 작업 → 백그라운드 Heavy(동기 타임아웃 회피)."""
+    for q in ["antigravity-cli 스킬 설치해줘", "install the antigravity-cli skill",
+              "excel-author 스킬 활성화해줘", "enable the powerpoint skill"]:
+        kind, prio, reason, ambiguous = classifier.prefilter(q, source="tui")
+        assert kind == TaskKind.HEAVY.value and not ambiguous, (q, kind, reason)
+        assert "install" in reason
+
+
+def test_classify_skill_list_stays_light():
+    """스킬 '목록/조회'는 빠른 읽기 → Light 유지(설치류와 구분)."""
+    for q in ["스킬 목록 보여줘", "설치된 스킬 알려줘"]:
+        kind, _p, _r, _a = classifier.prefilter(q, source="tui")
+        assert kind == TaskKind.LIGHT.value, (q, kind)
 
 
 def test_start_failure_transient_requeues(tmp_path):

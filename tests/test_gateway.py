@@ -231,6 +231,16 @@ def test_priority_override_header_forces_heavy(app_client):
     assert t.kind == "heavy" and t.priority == 2
 
 
+def test_depth_override_header(app_client):
+    tc, mgr, fake = app_client
+    # 대규모 입력은 자동이면 high 로 가지만, 헤더로 low 강제
+    r = tc.post("/v1/runs", json={"input": "전체 코드베이스를 대규모로 리팩토링하고 분석"},
+                headers={"X-Alphred-Depth": "low"})
+    assert r.status_code == 202
+    assert r.json()["depth"] == "low"
+    assert mgr.get(r.json()["run_id"]).depth == "low"
+
+
 def test_light_preempts_running_heavy(app_client):
     tc, mgr, fake = app_client
     # Heavy 를 직접 등록하고 In-Progress 로 만든다(완료 막기)
@@ -254,6 +264,48 @@ def test_queue_management_endpoints(app_client):
     assert any(t["id"] == rid for t in tc.get("/queue").json()["tasks"])
     # 폐기
     assert tc.request("DELETE", f"/queue/{rid}").json()["state"] == TaskState.DISCARDED.value
+
+
+def test_queue_purge_endpoint(app_client):
+    tc, mgr, fake = app_client
+    rid = tc.post("/v1/runs", json={"input": "작업"}).json()["run_id"]
+    # 영구 삭제 → DB 에서 완전히 사라진다(discard 와 달리 history 에도 없음)
+    assert tc.request("DELETE", f"/queue/{rid}/purge").json()["purged"] is True
+    assert mgr.get(rid) is None
+    assert not any(t["id"] == rid for t in tc.get("/queue").json()["tasks"])
+    # 없는 작업 purge → 404
+    assert tc.request("DELETE", f"/queue/{rid}/purge").status_code == 404
+
+
+def test_queue_clear_history_endpoint(app_client):
+    tc, mgr, fake = app_client
+    done = mgr.submit("끝난 작업", kind="heavy")
+    mgr.store.transition(done.id, TaskState.IN_PROGRESS)
+    mgr.store.transition(done.id, TaskState.COMPLETED, reason="done")
+    pending = mgr.submit("대기 작업", kind="heavy")
+    r = tc.post("/queue/clear")
+    assert r.json()["cleared"] == 1            # 종료된 작업만 삭제
+    assert mgr.get(done.id) is None            # 완료 작업 제거됨
+    assert mgr.get(pending.id) is not None     # 진행/대기 작업은 보존
+
+
+def test_queue_view_exposes_session_key(app_client):
+    tc, mgr, fake = app_client
+    t = mgr.submit("세션 태그 작업", kind="heavy", session_key="alphred-tui-abcd1234")
+    row = next(x for x in tc.get("/queue").json()["tasks"] if x["id"] == t.id)
+    assert row["session_key"] == "alphred-tui-abcd1234"   # TUI 큐 표의 세션 열 데이터원
+
+
+def test_queue_purge_by_session(app_client):
+    tc, mgr, fake = app_client
+    a = mgr.submit("작업A", kind="heavy", session_key="sess-x")
+    b = mgr.submit("작업B", kind="heavy", session_key="sess-x")
+    c = mgr.submit("작업C", kind="heavy", session_key="sess-y")
+    # 세션 삭제 연쇄: sess-x 작업만 영구 제거, 다른 세션은 보존
+    r = tc.request("DELETE", "/queue/by-session/sess-x")
+    assert r.json()["purged"] == 2
+    assert mgr.get(a.id) is None and mgr.get(b.id) is None
+    assert mgr.get(c.id) is not None
 
 
 def test_queue_retry_endpoint(app_client):
@@ -378,3 +430,45 @@ def test_auth_required_when_key_set(tmp_path, monkeypatch):
     with TestClient(app) as tc:
         assert tc.get("/v1/models").status_code == 401
         assert tc.get("/v1/models", headers={"Authorization": "Bearer secret"}).status_code == 200
+
+
+def _spawn_env(tmp_path, autonomous_exec, monkeypatch):
+    """_spawn_hermes_gateway 가 Popen 에 넘기는 env 를 가로채 반환(실제 기동 없이)."""
+    import subprocess
+    from alphred import gateway
+    from alphred.config import Config
+    cfg = Config.load()
+    cfg.hermes_bin = "hermes"            # None 이면 조기 반환
+    cfg.alphred_home = tmp_path          # hermes.log 쓰기 가능 위치
+    cfg.autonomous_exec = autonomous_exec
+    captured = {}
+
+    class _FakeProc:
+        pass
+
+    def fake_popen(args, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    gateway._spawn_hermes_gateway(cfg, "k")
+    return captured["env"]
+
+
+def test_autonomous_exec_injects_yolo(tmp_path, monkeypatch):
+    """§28: autonomous_exec=True 면 spawn env 에 HERMES_YOLO_MODE=1 주입(승인대기 차단 해소)."""
+    env = _spawn_env(tmp_path, True, monkeypatch)
+    assert env.get("HERMES_YOLO_MODE") == "1"
+    assert env.get("API_SERVER_ENABLED") == "true"
+
+
+def test_autonomous_exec_off_no_yolo(tmp_path, monkeypatch):
+    """autonomous_exec=False 면 YOLO 미주입(기본 승인 정책 유지)."""
+    env = _spawn_env(tmp_path, False, monkeypatch)
+    assert "HERMES_YOLO_MODE" not in env
+
+
+def test_stream_read_timeout_injected(tmp_path, monkeypatch):
+    """§32: Alphred가 띄운 게이트웨이에 HERMES_STREAM_READ_TIMEOUT 주입(느린 모델 타임아웃 완화)."""
+    env = _spawn_env(tmp_path, True, monkeypatch)
+    assert float(env["HERMES_STREAM_READ_TIMEOUT"]) >= 120   # 기본 120s 이상으로 상향

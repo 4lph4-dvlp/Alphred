@@ -4,15 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alphred"
-version = "0.1.0"
-description = "Priority-queue middleware + state machine wrapper over Hermes Agent"
+version = "0.9.0"
+description = "Personal AI agent conductor over Hermes Agent — preemptive priority queue, intent triage, intake questions, executable plans, step-wise orchestrated execution, and multi-device access (TUI / web / API / embedded)"
+readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["agent", "llm", "hermes", "queue", "orchestration", "assistant"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "httpx>=0.27",
-    "textual>=0.60",
+    "textual>=1.0",
 ]
+
+[project.urls]
+Documentation = "https://github.com/4lph4-dvlp/alphred#readme"
+Changelog = "https://github.com/4lph4-dvlp/alphred/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -22,6 +37,9 @@ alphred = "alphred.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["alphred*"]
+
+[tool.setuptools.package-data]
+alphred = ["assets/*.txt", "assets/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

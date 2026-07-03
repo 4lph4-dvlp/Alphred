@@ -30,6 +30,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   .pill { padding:2px 8px; border-radius:20px; font-size:12px; border:1px solid var(--line); }
   .Pending{color:#9fb4ff;} .In-Progress{color:#5be37a;} .Paused{color:var(--acc);}
   .Completed{color:#7fd1a8;} .Discarded{color:#ff7a7a;} .NeedsReview{color:#ffb454;}
+  .AwaitingInput{color:#ffd166;}
   .prio { width:56px; }
   .muted { color:var(--mut); }
   .act button { padding:3px 8px; font-size:12px; margin-right:4px; }
@@ -69,7 +70,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 </main>
 <script>
-const ACTIVE = ["Pending","In-Progress","Paused"];
+const ACTIVE = ["AwaitingInput","Pending","In-Progress","Paused"];
 const $ = s => document.querySelector(s);
 function key(){ return $("#apikey").value.trim(); }
 function hdr(extra){ const h = extra||{}; const k=key(); if(k) h["Authorization"]="Bearer "+k; return h; }
@@ -98,6 +99,8 @@ function rowActive(t){
   const dis = t.state==="Discarded"||t.state==="Completed";
   const pauseBtn = t.state==="In-Progress" ? `<button onclick="act('${t.id}','pause')">⏸</button>` :
                    t.state==="Paused" ? `<button onclick="act('${t.id}','resume')">▶</button>` : "";
+  const answerBtn = t.state==="AwaitingInput" ?
+                   `<button onclick="answerTask('${t.id}')">💬 답변</button>` : "";
   return `<tr class="row" draggable="true" data-id="${t.id}">
     <td class="muted">≡</td>
     <td><input class="prio" type="number" min=1 max=10 value="${t.priority}"
@@ -106,8 +109,29 @@ function rowActive(t){
     <td>${t.kind}</td>
     <td title="${esc(t.prompt)}">${esc(cut(t.prompt,60))}</td>
     <td class="muted">${t.retries?("↻"+t.retries):""}</td>
-    <td class="act">${pauseBtn}<button onclick="discard('${t.id}')">🗑</button></td>
+    <td class="act">${answerBtn}${pauseBtn}<button onclick="discard('${t.id}')">🗑</button></td>
   </tr>`;
+}
+// §34.4 인테이크 답변 — 질문별 prompt(빈 값=추천, 번호=선택지, 직접 입력 가능)
+async function answerTask(id){
+  const t = await api(`/queue/${id}`);
+  const qs = t.questions||[];
+  const answers = [];
+  for(const q of qs){
+    const opts = (q.options||[]).map((o,i)=>`${i+1}. ${o.label}${o.recommended?" (추천)":""}`).join("\n");
+    const rec = (q.options||[]).find(o=>o.recommended);
+    const v = prompt(`${q.q}\n${opts}\n\n번호 또는 직접 입력 (빈 값=추천 선택)`, "");
+    if(v===null) return;                       // 취소 → 답변 대기 유지(타임아웃 시 가정 진행)
+    let ans = (v||"").trim();
+    if(!ans) ans = rec? rec.label : ((q.options||[])[0]||{}).label||"";
+    else if(/^\d+$/.test(ans) && q.options && q.options[+ans-1]) ans = q.options[+ans-1].label;
+    answers.push({q:q.q, answer:ans});
+  }
+  if(answers.length){
+    await api(`/queue/${id}/answers`,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({answers})});
+    load();
+  }
 }
 function rowHist(t){
   return `<tr><td>${t.priority}</td><td><span class="pill ${t.state}">${t.state}</span></td>

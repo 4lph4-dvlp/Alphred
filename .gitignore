@@ -12,3 +12,7 @@ poc/_gateway.log
 _pdf_text.txt
 _extract.py
 QUEUE.MD
+
+# 실수로 추가된 대용량 바이너리(크롬 설치 파일)
+docs/ChromeSetup.exe
+*.exe

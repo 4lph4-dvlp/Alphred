@@ -1,0 +1,34 @@
+{"prompt": "미국 주식 시장 보고서 만들어줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "형식(pdf/md)", "critical": true}]}, "should_ask": true, "note": "산출물 형식이 결과를 좌우"}
+{"prompt": "우리 회사 소개 자료 만들어줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "대상 독자", "critical": true}, {"what": "분량", "critical": false}]}, "should_ask": true, "note": "독자에 따라 톤/구성 상이"}
+{"prompt": "build a competitor analysis deck", "source": "chat", "kind": "heavy", "card": {"missing_info": [{"what": "which competitors", "critical": true}]}, "should_ask": true, "note": "대상 미지정이면 무용"}
+{"prompt": "이 데이터로 차트 뽑아줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "어떤 데이터/파일 경로", "critical": true}]}, "should_ask": true, "note": "입력 자체가 불명"}
+{"prompt": "번역본 문서로 정리해줘", "source": "chat", "kind": "heavy", "card": {"missing_info": [{"what": "대상 언어", "critical": true}]}, "should_ask": true, "note": "언어 오판 시 무용"}
+{"prompt": "예산안 시트 만들어줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "기간/항목 범위", "critical": true}]}, "should_ask": true, "note": "범위가 결과 좌우"}
+{"prompt": "발표자료 준비해줘", "source": "chat", "kind": "heavy", "card": {"missing_info": [{"what": "발표 주제", "critical": true}]}, "should_ask": true, "note": "주제 불명"}
+{"prompt": "코드 리뷰 보고서 작성해줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "대상 저장소/브랜치", "critical": true}]}, "should_ask": true, "note": "대상 불명"}
+{"prompt": "여행 일정 짜서 문서로 줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "여행지/기간", "critical": true}]}, "should_ask": true, "note": "핵심 파라미터 부재"}
+{"prompt": "신제품 가격 분석해줘", "source": "chat", "kind": "heavy", "card": {"missing_info": [{"what": "제품/시장", "critical": true}]}, "should_ask": true, "note": "대상 불명"}
+{"prompt": "이번 주 AI 뉴스 크롤링해서 요약 보고서 만들어줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "보고서 분량", "critical": false}]}, "should_ask": false, "note": "분량은 합리적 가정 가능 — 질문 불필요"}
+{"prompt": "refactor the utils module to be more readable", "source": "tui", "kind": "heavy", "card": {"missing_info": []}, "should_ask": false, "note": "충분히 명확"}
+{"prompt": "전체 코드베이스 리팩토링 해줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "선호 코딩 스타일", "critical": false}]}, "should_ask": false, "note": "스타일은 기존 관례로 가정"}
+{"prompt": "파이썬 3.13 새 기능 정리해서 블로그 초안 써줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "블로그 톤", "critical": false}]}, "should_ask": false, "note": "톤은 가정 가능"}
+{"prompt": "서버 로그 분석해서 장애 원인 찾아줘", "source": "tui", "kind": "heavy", "card": {"missing_info": []}, "should_ask": false, "note": "도구로 발견 가능"}
+{"prompt": "summarize this repo's architecture into a doc", "source": "chat", "kind": "heavy", "card": {"missing_info": []}, "should_ask": false, "note": "자체 탐색 가능"}
+{"prompt": "지난 분기 매출 데이터로 엑셀 정리해줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "시트 구성 선호", "critical": false}]}, "should_ask": false, "note": "구성은 표준 가정"}
+{"prompt": "크롤링 스크립트 만들어서 저장해줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "대상 사이트", "critical": true}]}, "should_ask": true, "note": "대상 없으면 무용"}
+{"prompt": "미국 주식 시장 보고서 만들어줘", "source": "cron", "kind": "heavy", "card": {"missing_info": [{"what": "형식", "critical": true}]}, "should_ask": false, "note": "cron 은 답할 사용자 없음 → 질문 0(QA-34.5)"}
+{"prompt": "build a market report", "source": "api", "kind": "heavy", "card": {"missing_info": [{"what": "format", "critical": true}]}, "should_ask": false, "note": "api 클라이언트는 동기 폴링 — 질문 0(QA-34.5)"}
+{"prompt": "generate weekly digest", "source": "subservice", "kind": "heavy", "card": {"missing_info": [{"what": "recipients", "critical": true}]}, "should_ask": false, "note": "하위 서비스 — 질문 0"}
+{"prompt": "번역해줘: good morning", "source": "tui", "kind": "light", "card": {"missing_info": [{"what": "존댓말 여부", "critical": true}]}, "should_ask": false, "note": "Light 는 즉답 — 질문 없이 답"}
+{"prompt": "what's 2+2?", "source": "chat", "kind": "light", "card": {"missing_info": []}, "should_ask": false, "note": "즉답"}
+{"prompt": "오늘 날씨 알려줘", "source": "tui", "kind": "light", "card": {"missing_info": [{"what": "지역", "critical": false}]}, "should_ask": false, "note": "즉답+가정"}
+{"prompt": "DB 마이그레이션 실행해줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "대상 DB(운영/스테이징)", "critical": true}]}, "should_ask": true, "note": "고위험 — 오판 시 피해"}
+{"prompt": "이 문서 요약해서 팀에 공유할 형태로 만들어줘", "source": "chat", "kind": "heavy", "card": {"missing_info": [{"what": "어떤 문서", "critical": true}]}, "should_ask": true, "note": "입력 문서 불명"}
+{"prompt": "고객 설문 만들어줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "설문 목적/대상", "critical": true}]}, "should_ask": true, "note": "목적 불명"}
+{"prompt": "테스트 커버리지 올려줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "목표 수치", "critical": false}]}, "should_ask": false, "note": "합리적 기본 목표 가정"}
+{"prompt": "사이트 성능 개선해줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "어떤 사이트", "critical": true}]}, "should_ask": true, "note": "대상 불명"}
+{"prompt": "monthly report", "source": "cron", "kind": "heavy", "card": {"missing_info": []}, "should_ask": false, "note": "cron 정기작업"}
+{"prompt": "이력서 다듬어서 PDF로 만들어줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "이력서 파일 위치", "critical": true}]}, "should_ask": true, "note": "입력 파일 불명"}
+{"prompt": "코드에 주석 좀 달아줘", "source": "tui", "kind": "heavy", "card": {"missing_info": [{"what": "주석 언어(한/영)", "critical": false}]}, "should_ask": false, "note": "관례로 가정"}
+{"prompt": "경쟁사 뉴스 모니터링 리포트", "source": "api", "kind": "heavy", "card": {"missing_info": [{"what": "경쟁사 목록", "critical": true}]}, "should_ask": false, "note": "api 소스 — 질문 0, 가정 기록"}
+{"prompt": "온보딩 가이드 문서 만들어줘", "source": "chat", "kind": "heavy", "card": {"missing_info": [{"what": "신입 직군", "critical": true}]}, "should_ask": true, "note": "직군별 내용 상이"}

@@ -6,7 +6,8 @@ import json
 from alphred import classifier
 from alphred.db import Store
 from alphred.models import TaskKind
-from alphred.queue_manager import QueueManager, _plan_hint
+from alphred.prompt import _plan_hint
+from alphred.queue_manager import QueueManager
 
 
 # ---- 3-tier 사전필터 ----
@@ -141,7 +142,7 @@ def test_submit_with_precomputed_classification_stores_plan(tmp_path):
                 "urgent": False}
 
     mgr = _mgr(tmp_path, planner)
-    k, p, reason, plan = mgr.classify_full(
+    k, p, reason, plan, _intent = mgr.classify_full(
         "이 자료를 살펴보고 알맞게 다뤄주면 좋겠어 천천히 진행해도 괜찮아")
     assert k == TaskKind.HEAVY.value and plan is not None
     t = mgr.submit("...", source="tui", kind=k, priority=p, plan=plan, classify_reason=reason)

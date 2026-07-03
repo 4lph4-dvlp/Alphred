@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 
 
 class TaskState(str, enum.Enum):
+    AWAITING_INPUT = "AwaitingInput"  # 착수 전 사용자 답변 대기 (비실행, §34.4 — 타임아웃 시 가정 진행)
     PENDING = "Pending"          # 시작 전
     IN_PROGRESS = "In-Progress"  # 진행 중
     PAUSED = "Paused"            # 일시중지
@@ -50,6 +51,11 @@ class Task:
     verify_report: str | None = None      # JSON; 검증·수용 결과(Tier0/Tier2 §21)
     verify_attempts: int = 0              # 검증 폐루프 재시도 횟수(§21 Tier3)
     verify_feedback: str | None = None    # 직전 검증 미흡 항목(재시도 입력에 주입)
+    intent: str | None = None             # JSON; §34.2 IntentCard(goal/depth/missing_info 등)
+    questions: str | None = None          # JSON; §34.4 인테이크 질문(선택지+추천 포함)
+    answers: str | None = None            # JSON; §34.4 사용자 답변(실행 입력에 주입)
+    assumptions: str | None = None        # JSON; §34.4 가정 원장(무답변 진행 시 채택·표면화)
+    input_deadline: str | None = None     # ISO8601; §34.4 답변 대기 타임아웃(경과 시 가정 진행)
     plan: str | None = None               # JSON; 계획기반 분류의 하위작업 분해(실행 힌트로 재활용)
     plan_progress: int = 0                # 실행 중 완료한 도구 호출 수(단계 진행 추적, §19 P3)
     plan_activity: str | None = None      # 현재/최근 도구 활동(예: web_search)

@@ -6,7 +6,11 @@ full(ALPHRED - AGENT) / half(ALPHRED) / mini(A) 세 변형을 골라 짤림을 �
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from rich.text import Text
+
+_ASSETS = Path(__file__).resolve().parent / "assets"
 
 # "ALPHRED  -  AGENT" — 박스드로잉 ASCII 아트(원본: alphred/branding/assets/Alphred_Banner.txt)
 _BANNER = r"""
@@ -35,10 +39,9 @@ _W_HALF = max(len(l) for l in _BANNER_HALF)   # 56
 _W_MINI = max(len(l) for l in _BANNER_MINI)   # 8
 _BANNER_W = _W_FULL                        # (하위호환: 기존 테스트 참조)
 
-# 메인화면 엠블럼(로고) — 원본 Alphred_Logo.txt(브랜딩 폐기와 함께 삭제됨) 대체.
-# 솟은 삼각(최우선) + 그 아래로 짧아지는 막대(우선순위 큐/선점 스케줄러)를 형상화.
-# 배너와 동일하게 █ 와 ═(박스드로잉)만 사용 → 터미널/폰트 호환(깨짐 방지).
-_LOGO = r"""
+# 메인화면 엠블럼(로고) — 원본 Alphred_Logo.txt 아스키 아트(assets/ 에 패키징).
+# 자산이 없을 때를 대비한 최소 폴백(솟은 삼각 = 최우선 + 선점 큐).
+_LOGO_FALLBACK = r"""
     █
    ███
   █████
@@ -49,7 +52,45 @@ _LOGO = r"""
    ███
     █
 """.strip("\n").splitlines()
-_W_LOGO = max(len(l) for l in _LOGO)
+
+
+def _normalize(lines: list[str]) -> list[str]:
+    """상하 빈 줄 제거 + 좌측 공통 들여쓰기 제거(초상화 내부 정렬은 보존)."""
+    lines = [ln.rstrip() for ln in lines]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return []
+    indent = min((len(ln) - len(ln.lstrip(" ")) for ln in lines if ln.strip()), default=0)
+    return [ln[indent:] for ln in lines]
+
+
+def _load_logo(name: str) -> list[str]:
+    """assets/<name> 로고 아트를 읽어 정규화한다. 없으면 폴백."""
+    try:
+        raw = (_ASSETS / name).read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return _normalize(_LOGO_FALLBACK)
+    out = _normalize(raw)
+    return out or _normalize(_LOGO_FALLBACK)
+
+
+# 배너처럼 화면 크기에 따라 고르는 로고 크기 변형(100% / 75% / 50%).
+_LOGO_FULL = _load_logo("Alphred_Logo.txt")
+_LOGO_75 = _load_logo("Alphred_Logo_75.txt")
+_LOGO_50 = _load_logo("Alphred_Logo_50.txt")
+_LOGO = _LOGO_FULL                         # (하위호환: 기존 참조)
+_W_LOGO = max((len(l) for l in _LOGO), default=0)
+
+
+def _logo_dims(lines: list[str]) -> tuple[int, int]:
+    return (max((len(l) for l in lines), default=0), len(lines))
+
+
+# 큰 것부터: (lines, width, height)
+_LOGO_VARIANTS = [(v, *_logo_dims(v)) for v in (_LOGO_FULL, _LOGO_75, _LOGO_50) if v]
 
 # §10.7 Alph-RED 그라데이션(밝음→어두움). 줄 수에 맞춰 균등 매핑.
 _GRADIENT = ["#FF9F45", "#FF7A3D", "#FB5A3C", "#F03E41", "#E63946", "#D32F3C", "#B22232", "#8E1B28"]
@@ -82,6 +123,37 @@ def banner_lines(avail_width: int | None = None) -> list[Text]:
     return _gradient_lines(raw)
 
 
-def logo_lines(center_to: int | None = None) -> list[Text]:
-    """배너(또는 지정) 폭 기준 가운데 정렬된 로고(엠블럼) 줄들."""
-    return _gradient_lines(_LOGO, center_to=center_to if center_to is not None else _W_FULL)
+def _gradient_block(lines: list[str], *, center_to: int = 0) -> list[Text]:
+    """블록 전체에 동일한 좌측 패딩을 적용해 가운데 정렬(초상화 정렬 보존) + 세로 그라데이션."""
+    n = max(1, len(lines))
+    block_w = max((len(l) for l in lines), default=0)
+    pad = max(0, (center_to - block_w) // 2) if center_to else 0
+    out: list[Text] = []
+    for i, line in enumerate(lines):
+        color = _GRADIENT[min(len(_GRADIENT) - 1, i * len(_GRADIENT) // n)]
+        out.append(Text(" " * pad + line, style=f"bold {color}", no_wrap=True))
+    return out
+
+
+def pick_logo(avail_width: int, avail_height: int) -> tuple[list[str], int, int]:
+    """가용 폭·높이에 모두 들어가는 가장 큰 로고 변형을 고른다(100%→75%→50%).
+
+    배너의 pick_banner 와 같은 전략. 어느 것도 안 들어가면 ([],0,0) → 로고 생략.
+    """
+    for lines, w, h in _LOGO_VARIANTS:
+        if avail_width >= w and avail_height >= h:
+            return lines, w, h
+    return [], 0, 0
+
+
+def logo_lines(center_to: int | None = None, avail_height: int | None = None) -> list[Text]:
+    """블록 가운데 정렬된 로고(엠블럼) 줄들 — 폭/높이에 맞는 변형 자동 선택.
+
+    avail_height 미지정 시 높이 제약 없음(가장 큰 변형). 들어갈 변형이 없으면 빈 리스트.
+    """
+    target = center_to if center_to is not None else _W_FULL
+    lines, w, _h = pick_logo(target or _W_FULL,
+                             avail_height if avail_height is not None else 10**9)
+    if not lines:
+        return []
+    return _gradient_block(lines, center_to=target)

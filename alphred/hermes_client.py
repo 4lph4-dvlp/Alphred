@@ -8,7 +8,6 @@ Phase 0 PoC 에서 검증한 엔드포인트만 사용한다:
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
@@ -78,15 +77,6 @@ class HermesClient:
         return r.json()
 
     # ---- responses (동기/재개) ----
-    def respond(self, prompt: str, *, previous_response_id: str | None = None,
-                model: str = "hermes-agent") -> dict:
-        body: dict[str, Any] = {"model": model, "input": prompt}
-        if previous_response_id:
-            body["previous_response_id"] = previous_response_id
-        r = self._http.post("/responses", json=body)
-        r.raise_for_status()
-        return r.json()
-
     def respond_passthrough(self, body: dict) -> dict:
         """원본 요청 본문을 그대로 /responses 로 프록시(멀티모달 input·옵션 보존).
 
@@ -113,28 +103,15 @@ class HermesClient:
         r.raise_for_status()
         return r.json()
 
+    def toolsets(self) -> dict:
+        """활성 툴셋/도구 목록(:8642 /v1/toolsets) — 능력 레지스트리(§34.5)가 소비."""
+        r = self._http.get("/toolsets")
+        r.raise_for_status()
+        return r.json()
+
     def health(self) -> bool:
         try:
             r = self._http.get("/models")
             return r.status_code == 200
         except Exception:
             return False
-
-
-def extract_text(response_obj: dict) -> str:
-    """OpenAI Responses 객체에서 최종 텍스트를 best-effort 로 추출."""
-    if not isinstance(response_obj, dict):
-        return str(response_obj)
-    # output_text 우선
-    if isinstance(response_obj.get("output_text"), str):
-        return response_obj["output_text"]
-    out = response_obj.get("output")
-    parts: list[str] = []
-    if isinstance(out, list):
-        for item in out:
-            for c in (item.get("content") or []):
-                if isinstance(c, dict) and c.get("type") in ("output_text", "text"):
-                    parts.append(c.get("text", ""))
-    if parts:
-        return "".join(parts)
-    return json.dumps(response_obj, ensure_ascii=False)[:2000]
