@@ -51,10 +51,19 @@ class HermesClient:
         conversation_history: list[dict] | None = None,
         previous_response_id: str | None = None,
         session_id: str | None = None,
+        attachments: list[dict] | None = None,
         model: str = "hermes-agent",
     ) -> str:
-        """비동기 run 시작 → run_id 반환."""
+        """비동기 run 시작 → run_id 반환.
+
+        attachments(§37 멀티모달 보존)가 있으면 input 을 메시지 배열로 보내 사용자
+        메시지에 텍스트+이미지 파트를 동봉한다 — Hermes /v1/runs 는 배열 input 의
+        마지막 메시지 content 를 그대로 run_conversation 에 전달한다(실측).
+        """
         body: dict[str, Any] = {"model": model, "input": prompt}
+        if attachments:
+            body["input"] = [{"role": "user",
+                              "content": [{"type": "text", "text": prompt}, *attachments]}]
         if conversation_history:
             body["conversation_history"] = conversation_history
         elif previous_response_id:

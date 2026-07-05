@@ -14,5 +14,6 @@ _extract.py
 QUEUE.MD
 
 # 실수로 추가된 대용량 바이너리(크롬 설치 파일)
-docs/ChromeSetup.exe
+docs/
 *.exe
+scratch/

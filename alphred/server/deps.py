@@ -131,6 +131,41 @@ def extract(body: dict) -> tuple[str, bool]:
     return "", False
 
 
+def extract_attachments(body: dict) -> list[dict] | None:
+    """마지막 사용자 메시지의 이미지 파트를 Hermes 표준형으로 수집(§37 Heavy 멀티모달 보존).
+
+    Heavy 큐 경로는 텍스트만 저장하므로 image_url/input_image 파트를
+    {"type":"image_url","image_url":{"url",...}} 표준형으로 정규화해 별도 보존한다
+    (Hermes /v1/runs 는 배열 input 을 정규화 없이 그대로 쓰므로 표준형이 필요 — 실측).
+    오디오/파일 파트는 Hermes /v1/runs 미지원 → 제외(오디오는 Light 로 라우팅됨).
+    """
+    raw = body.get("input")
+    content = None
+    if isinstance(raw, list) and raw and isinstance(raw[-1], dict):
+        content = raw[-1].get("content", raw[-1])
+    else:
+        msgs = body.get("messages")
+        if isinstance(msgs, list) and msgs and isinstance(msgs[-1], dict):
+            content = msgs[-1].get("content")
+    if not isinstance(content, list):
+        return None
+    out: list[dict] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") not in ("image_url", "input_image"):
+            continue
+        # chat 형(image_url={"url",...}) 과 responses 형(image_url=str) 모두 수용
+        ref = part.get("image_url")
+        url = ref.get("url") if isinstance(ref, dict) else ref
+        if not (isinstance(url, str) and url.strip()):
+            continue
+        img: dict = {"type": "image_url", "image_url": {"url": url.strip()}}
+        detail = ref.get("detail") if isinstance(ref, dict) else part.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            img["image_url"]["detail"] = detail.strip()
+        out.append(img)
+    return out or None
+
+
 def route_kind_hint(text: str, has_audio: bool, kind: str | None) -> str | None:
     # 텍스트 없는 음성 명령은 실시간 상호작용 → Light 로 라우팅(전사는 Hermes 가 수행)
     if kind is None and has_audio and not text.strip():
@@ -215,13 +250,19 @@ def route_realtime(deps: GatewayDeps, body: dict, request: Request, src: str,
     prio, kind = overrides(request)
     text, has_audio = extract(body)
     kind = route_kind_hint(text, has_audio, kind)
+    # §40 세션 식별 — body.session_id(비표준 확장) 또는 헤더. 없으면 원장/재작성 없이 종전 동작.
+    sess = body.get("session_id") if isinstance(body.get("session_id"), str) else None
+    sess = (sess or request.headers.get("x-alphred-session") or "").strip() or None
     ctx = context_of(body)                      # §34.2 A2 — 이전 대화 맥락
+    ctx = deps.mgr.session_context(sess, ctx)   # §40 + 세션 작업 원장(서버측 보완)
     k, p, reason, plan, intent = deps.mgr.classify_full(
         text, source=src, explicit_priority=prio, explicit_kind=kind, context=ctx)
     if k == TaskKind.HEAVY.value:
         task = submit(deps.mgr, text, source=src, priority=p, kind=k,
+                      session_key=sess,
                       plan=plan, classify_reason=reason, depth=depth_ov(request),
-                      intent=intent, context=ctx)
+                      intent=intent, context=ctx,
+                      attachments=extract_attachments(body))  # §37 이미지 보존
         if task.state == TaskState.AWAITING_INPUT.value:
             return needs_input_response(task)   # §34.4 착수 전 질문
         return JSONResponse(status_code=202,
@@ -278,6 +319,9 @@ def task_view(t) -> dict:
         "input_deadline": getattr(t, "input_deadline", None),
         "id": t.id, "state": t.state, "priority": t.priority, "kind": t.kind,
         "source": t.source, "prompt": t.prompt, "result": t.result,
+        # §40 — 지시어 해소본(있으면 이것이 실행 기준)과 실존 산출물 경로
+        "resolved_prompt": getattr(t, "resolved_prompt", None),
+        "artifacts": _j("artifacts"),
         "session_key": getattr(t, "session_key", None),
         "classify_reason": t.classify_reason, "created_at": t.created_at,
         "depth": getattr(t, "depth", None), "verify_report": verify, "error": t.error,

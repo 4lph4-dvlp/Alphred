@@ -619,6 +619,9 @@ Both run **no live LLM calls** (quota-safe). `doctor` flags any unreachable comp
 | `ALPHRED_WATCHDOG` | off | §34.6 E3 in-flight watchdog — detects a run going wrong **while it runs**: ≥N consecutive tool failures (from the event stream) or no observable activity for `ALPHRED_STALL_SECONDS` ⇒ stop the run and re-queue it with a corrective hint ("don't repeat the same approach — diagnose first, try a different tool/library"). Orchestrated tasks get the hint on the current step; repeated interventions are capped by `ALPHRED_MAX_RETRIES` ⇒ `NeedsReview`. |
 | `ALPHRED_STALL_SECONDS` | `600` | §34.6 E3 no-progress threshold (seconds without any run event / DB activity). |
 | `ALPHRED_TOOL_FAIL_LIMIT` | `3` | §34.6 E3 consecutive tool-failure threshold that triggers intervention. |
+| `ALPHRED_SLOTS` | `1` | §38.2. Number of concurrent Heavy task slots to execute (`auto` or integer). |
+| `ALPHRED_SLOTS_MAX` | `4` | Auto-scaling concurrent execution slots ceiling when `ALPHRED_SLOTS="auto"`. |
+
 
 ### Classification (how Heavy/Light is decided)
 
@@ -642,7 +645,7 @@ Both run **no live LLM calls** (quota-safe). `doctor` flags any unreachable comp
 - **Classifier LLM fallback / multimodal / MCP source tagging**: ✅
 - **Dedicated Alphred TUI**: ✅ Textual terminal client (chat + live queue table + completion alerts)
 - **Live tool-activity (SSE)**: ✅ TUI streams `tool.started/completed` + the answer via gateway `/chat/stream`
-- **Slash commands**: ✅ `/` opens a filtered command palette (`/help`, `/model`, `/depth`, `/plan`, `/clear`, `/queue …`, `/answer`, `/sessions`, `/skills`, `/export`, `/banner`, `/quit`)
+- **Slash commands**: ✅ `/` opens a filtered command palette (`/help`, `/model`, `/depth`, `/plan`, `/clear`, `/queue …`, `/answer`, `/sessions`, `/skills`, `/export`, `/banner`, `/exit`, `/quit`)
 - **TUI overhaul T1 (§36)**: ✅ widget-based chat (tool blocks `●/⎿` update in place), Markdown-rendered answers, terminal-adaptive theme (forced background removed), compact welcome panel (full art via `/banner`), status bar with spinner/elapsed time + live queue badges `▶⏳❓⚠`
 - **TUI overhaul T2 (§36)**: ✅ Esc interrupts the streaming answer, messages typed while busy auto-send afterwards, intake question cards (↑↓+Enter with ✦recommended preselected), fuzzy slash palette + argument completion (`/model`·`/depth`·`/sessions`·`/queue`), interactive session picker, Shift+Tab depth cycling, Ctrl+O verbose toggle (full thinking/tool output)
 - **TUI overhaul T3 — Mission Deck (§36)**: ✅ always-on queue panel retired → 3-tier queue: status-bar badges + **inline task cards** in the conversation (estimate/DoD, step progress bar, current step, preemption reason, verification badge — all updating in place) + **queue deck modal** (`Ctrl+T` / `/queue`: list + detail + single-slot visualization, action keys always shown) · `/answer` summons the question card for any awaiting-input task · completion/review/discard/awaiting transitions raise a toast + terminal bell (`ALPHRED_TUI_BELL`)
@@ -650,8 +653,10 @@ Both run **no live LLM calls** (quota-safe). `doctor` flags any unreachable comp
 - **Live token streaming**: ✅ streaming answer with queue badges + ⚠needs-attention
 - **Plan-aware classification**: ✅ LLM decomposes ambiguous requests into sub-tasks → deterministic Heavy/Light + plan reused at execution (`ALPHRED_PLANNER`)
 - **Live step progress**: ✅ background runs tracked via run events → inline task card shows a step progress bar + current step; deck detail shows the full plan checklist + verification evidence
-- **Hermes stays stock**: ✅ Alphred's identity lives in its own TUI; `hermes` has zero Alphred traces
 - **Output quality (§29)**: ✅ per-depth model routing (`/model high|mid|light`, `ALPHRED_MODEL_*`), Light harness (quick-answer system message), `alphred tune` (Hermes config quality audit/apply), Alphred-side MoA for high-depth — all core-untouched
+- **Multi-agent parallelization & budgets (§38)**: ✅ `ALPHRED_SLOTS` multi-agent parallel runs, AIMD capacity control, daily RPD limits gating (OpenRouter/NVIDIA NIM), Reasoning Gate
+- **Category-specific routing (§39)**: ✅ 9-category classification (Scout) & auto-routing on `"auto"` model tier, `scout-update` CLI
+- **Session context continuity (§40)**: ✅ Session Ledger facts/artifacts injection & Reference Resolution query rewrite to eliminate context drift
 - Next: real voice/image devices, update daemonization
 
 ---
@@ -671,6 +676,8 @@ alphred/
   models.py         Task / TaskState
   state_machine.py  enforces allowed transitions
   db.py             SQLite store (source of truth, atomic transitions + audit log)
+  budget.py         §38 provider daily budget (RPD) ledger & AIMD control
+  scout.py          §39 category-specific model catalog & Scout updates
   classifier.py     Light/Heavy classification + planner/judge/ranker/MoA prompts
   nlq.py            natural-language queue management (queue ask / /queue/ask)
   prompt.py         execution harness loaders (§26/§29.2) + background input assembly
@@ -703,3 +710,42 @@ alphred/
 poc/                Phase 0 primitive verification
 tests/              core-logic tests
 ```
+
+---
+
+## TUI Usage Tips & Guide
+
+### 1. Activating and Using Category-Specific Auto Model Routing (`auto`)
+Alphred automatically classifies Heavy tasks into 9 categories and routes them to the best available free model.
+- **Activation**: In the TUI chat input, run the command `/model high auto` or `/model mid auto` to map that specific depth tier to the `"auto"` sentinel.
+- **Updating the Catalog**: To update the curated category-to-model mapping table, run `alphred queue scout-update` from your shell. By default, it evaluates the best-performing models (including paid ones like Claude 3.5 Sonnet). Run `alphred queue scout-update --free` to evaluate and select only free models from NVIDIA NIM and OpenRouter. It runs canary smoke tests, prints available providers (with `-v`), and updates the local catalog. You can view the matching categories table in the TUI via `/model` or in the CLI via `alphred model`.
+- **Process**: When a new Heavy task is submitted, it is classified (e.g., programming questions -> `coding`). When dispatched, the scheduler routes it to the specific curated model for that category via the pre-registered `alphred-cat-<category>` alias.
+
+### 2. Configuring and Monitoring Parallel Task Execution
+- **Checking Slots**: Open the **Queue Deck** by pressing `Ctrl+T` or typing `/queue`. The top header displays slot usage as `▶ 실행 슬롯 (active_slots/max_slots)`. For example, `▶ 실행 슬롯 (2/4)` indicates 2 tasks are running concurrently out of 4 slots.
+- **Configuring Slots**: Set the `ALPHRED_SLOTS` environment variable when starting the Alphred gateway:
+  ```bash
+  # Execute up to 4 tasks in parallel
+  $env:ALPHRED_SLOTS="4"
+  # Automatically scale between 1 and 4 based on daily API quotas and queues
+  $env:ALPHRED_SLOTS="auto"
+  alphred serve
+  ```
+
+### 3. Handling Tasks That Need Attention
+Tasks requiring attention are divided into two states based on their lifecycle:
+
+- **Awaiting Input (`AwaitingInput` - ❓ Badge)**:
+  - **Reason**: The agent is asking for critical missing details before running the task (triggered when `ALPHRED_CLARIFY=1`).
+  - **Action**: Select the task in the Queue Deck (`Ctrl+T`) and press `a`, or type `/answer` (or `/answer <id>`) in the TUI input. This displays the **intake question card** where you can select recommended values or type custom answers. The task will then transition to `Pending` and run.
+  
+- **Needs Review (`NeedsReview` - ⚠ Badge)**:
+  - **Reason**: The task finished running but either **failed the automatic verification (verify/judge) criteria** or **exceeded the execution budget** (e.g., maximum run count).
+  - **Action**: Look at the right detail panel in the Queue Deck (`Ctrl+T`). It displays the failed steps, verify checks, and error logs. You can handle this task using:
+    - **`R` (Retry)**: Re-run the task from the beginning after correcting files or configurations.
+    - **`d` (Discard)**: Cancel and remove the task.
+    - **`r` (Resume)**: Force-resume the task, ignoring the check failures.
+
+- **Checking Previous Task Logs & History**:
+  - The Live View (`L` key) only streams events in real-time from the moment you connect. It does not replay historical logs.
+  - To review the history of a task, inspect the **inline task card** in your chat history or open the **Queue Deck (`Ctrl+T`)** and look at the right detail panel. It contains the checklist of steps, generated files, and check outputs.

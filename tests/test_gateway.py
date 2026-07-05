@@ -16,9 +16,11 @@ class FakeClient:
         self.chat_calls = 0
         self.respond_calls = 0
         self.stopped = []
+        self.started = []          # (prompt, kwargs) — §37 attachments 전달 검증용
 
     def start_run(self, prompt, **kw):
         rid = "run_" + new_id()[:8]
+        self.started.append((prompt, kw))
         self.status[rid] = {"status": "completed", "output": f"DONE:{prompt[:8]}"}
         return rid
 
@@ -218,6 +220,67 @@ def test_runs_enqueue_and_status(app_client):
     s = tc.get(f"/v1/runs/{rid}")
     assert s.status_code == 200
     assert s.json()["status"] in ("queued", "running", "completed")
+
+
+# ───────────────────────── §37 Heavy 멀티모달 보존 ─────────────────────────
+
+def test_chat_heavy_preserves_image_attachments(app_client):
+    """이미지 동봉 chat 요청이 Heavy 큐로 가면 이미지 파트를 보존, 디스패치에 재동봉."""
+    import json as _json
+    tc, mgr, fake = app_client
+    img = {"type": "image_url", "image_url": {"url": "https://x/a.png", "detail": "high"}}
+    r = tc.post("/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "이 이미지 분석해서 보고서 작성"}, img]}]},
+                headers={"X-Alphred-Kind": "heavy"})
+    assert r.status_code == 202
+    t = mgr.list()[0]
+    assert _json.loads(t.attachments) == [img]        # 큐에 이미지 보존
+    mgr.tick()
+    prompt, kw = fake.started[-1]
+    assert kw.get("attachments") == [img]             # 디스패치에 재동봉
+    assert "이미지 분석" in prompt
+
+
+def test_runs_normalizes_responses_style_image(app_client):
+    """/v1/runs — responses 형(input_image, image_url=str)도 표준형으로 정규화 보존."""
+    import json as _json
+    tc, mgr, fake = app_client
+    r = tc.post("/v1/runs",
+                json={"input": [{"role": "user", "content": [
+                    {"type": "input_text", "text": "긴 분석 작업"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAA"}]}]},
+                headers={"X-Alphred-Kind": "heavy"})
+    assert r.status_code == 202
+    t = mgr.list()[0]
+    assert _json.loads(t.attachments) == [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}]
+
+
+def test_start_run_builds_multimodal_input(monkeypatch):
+    """HermesClient.start_run — attachments 가 있으면 input 을 메시지 배열로 구성."""
+    from alphred.hermes_client import HermesClient
+    c = HermesClient("http://localhost:1/v1", None)
+    captured = {}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"run_id": "r1"}
+
+    monkeypatch.setattr(c._http, "post",
+                        lambda path, json=None: captured.update(path=path, body=json) or _R())
+    img = {"type": "image_url", "image_url": {"url": "https://x/a.png"}}
+    assert c.start_run("프롬프트", attachments=[img], session_id="s1") == "r1"
+    inp = captured["body"]["input"]
+    assert isinstance(inp, list) and inp[-1]["role"] == "user"
+    assert inp[-1]["content"] == [{"type": "text", "text": "프롬프트"}, img]
+    # attachments 없으면 기존 그대로 문자열 input(하위호환)
+    assert c.start_run("텍스트만") == "r1"
+    assert captured["body"]["input"] == "텍스트만"
+    c.close()
 
 
 def test_priority_override_header_forces_heavy(app_client):

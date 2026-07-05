@@ -611,6 +611,9 @@ alphred tune --apply    # 권장 설정 적용(config.yaml 백업; --revert 로 
 | `ALPHRED_WATCHDOG` | off | §34.6 E3 실행 중 감시 — 잘못 가는 실행을 **도중에** 감지: 연속 도구 실패 ≥N(이벤트 스트림) 또는 `ALPHRED_STALL_SECONDS` 동안 무진전 ⇒ run 중단 후 교정 힌트("같은 접근 반복 금지 — 원인 진단 후 다른 도구/라이브러리로")와 함께 재큐. 오케스트레이션 작업은 현재 스텝에 힌트 주입; 반복 개입은 `ALPHRED_MAX_RETRIES` 상한 ⇒ `NeedsReview`. |
 | `ALPHRED_STALL_SECONDS` | `600` | §34.6 E3 무진전 판정 기준(run 이벤트/DB 활동 없는 초). |
 | `ALPHRED_TOOL_FAIL_LIMIT` | `3` | §34.6 E3 개입을 트리거하는 연속 도구 실패 임계. |
+| `ALPHRED_SLOTS` | `1` | §38.2. 동시 실행할 Heavy 작업 슬롯 개수 (`auto` 혹은 정수). |
+| `ALPHRED_SLOTS_MAX` | `4` | `ALPHRED_SLOTS="auto"`일 때 자동 스케일링 동시 실행 상한. |
+
 
 ### 분류 방식 (Heavy/Light 판정)
 
@@ -634,7 +637,7 @@ alphred tune --apply    # 권장 설정 적용(config.yaml 백업; --revert 로 
 - **Classifier LLM 폴백 / 멀티모달 / MCP 서브서비스 태깅**: ✅
 - **전용 Alphred TUI**: ✅ Textual 터미널 클라이언트(대화 + 실시간 큐 표 + 완료 알림)
 - **실시간 작업 과정(SSE)**: ✅ 게이트웨이 `/chat/stream`으로 `tool.started/completed` + 답변 스트리밍
-- **슬래시 명령**: ✅ `/` 입력 시 명령 팝업(`/help`,`/model`,`/depth`,`/plan`,`/clear`,`/queue …`,`/answer`,`/sessions`,`/skills`,`/export`,`/banner`,`/quit`)
+- **슬래시 명령**: ✅ `/` 입력 시 명령 팝업(`/help`,`/model`,`/depth`,`/plan`,`/clear`,`/queue …`,`/answer`,`/sessions`,`/skills`,`/export`,`/banner`,`/exit`,`/quit`)
 - **TUI 대개편 T1(§36)**: ✅ 위젯 채팅(도구 블록 `●/⎿` 제자리 갱신), 최종 답변 마크다운 렌더, 터미널 적응 테마(배경 강제 제거), 컴팩트 웰컴 패널(전체 아트는 `/banner`), 상태줄(스피너+경과시간 · 큐 배지 `▶⏳❓⚠`)
 - **TUI 대개편 T2(§36)**: ✅ Esc 응답 즉시 중단, 응답 중 제출 = 완료 후 자동 전송, 인테이크 질문 카드(↑↓+Enter · ✦추천 기본 선택 · 직접 입력), 슬래시 fuzzy 매칭+인자 자동완성(`/model`·`/depth`·`/sessions`·`/queue`), 세션 피커 모달, Shift+Tab 심화도 순환, Ctrl+O 상세 토글(사고/도구 결과 전문)
 - **TUI 대개편 T3 — 미션 덱(§36)**: ✅ 상주 큐 패널 폐지 → 큐 3계층: 상태줄 배지 + **대화 속 인라인 작업 카드**(견적/DoD·스텝 진행바·현재 스텝·선점 사유·검증 뱃지를 제자리 갱신) + **큐 덱 모달**(`Ctrl+T`/`/queue`: 리스트+상세+단일 실행 슬롯 시각화, 조작 키 상시 표시) · `/answer` 로 답변 대기 작업 소환 · 완료/검토/폐기/대기 전이 토스트+벨(`ALPHRED_TUI_BELL`)
@@ -642,8 +645,10 @@ alphred tune --apply    # 권장 설정 적용(config.yaml 백업; --revert 로 
 - **라이브 토큰 스트리밍**: ✅ 답변 스트리밍 + 큐 배지 + ⚠확인필요
 - **계획 기반 분류**: ✅ 모호한 요청을 LLM이 하위작업으로 분해 → 결정적 Heavy/Light + 계획을 실행에 재활용 (`ALPHRED_PLANNER`)
 - **단계별 진행 표시**: ✅ 백그라운드 run을 이벤트로 추적 → 인라인 작업 카드에 스텝 진행바+현재 스텝, 덱 상세에 계획 체크리스트+검증 증거
-- **Hermes 순정 유지**: ✅ Alphred 정체성은 전용 TUI에만; `hermes` 는 Alphred 흔적 0
 - **결과물 품질 (§29)**: ✅ depth별 모델 라우팅(`/model high|mid|light`, `ALPHRED_MODEL_*`), Light 하네스(즉답 시스템 메시지), `alphred tune`(Hermes config 품질 감사/적용), high 한정 Alphred-side MoA — 전부 코어 무수정
+- **멀티에이전트 병렬화 및 한도 관리 (§38)**: ✅ `ALPHRED_SLOTS` 멀티에이전트 병렬 실행, AIMD 용량 제어, 일일 RPD 한도 게이팅(OpenRouter/NVIDIA NIM), Reasoning Gate
+- **카테고리 특화 모델 라우팅 (§39)**: ✅ 9대 카테고리(Scout) 분류 및 `auto` 설정 시 자동 모델 라우팅, `scout-update` CLI
+- **세션 컨텍스트 연속성 (§40)**: ✅ 세션 작업 원장(Session Ledger) 및 지시어 해소(Reference Resolution)를 통한 맥락 누수 해소
 - 후속: 실제 음성/이미지 디바이스, 업데이트 데몬화
 
 ---
@@ -663,6 +668,8 @@ alphred/
   models.py         Task / TaskState
   state_machine.py  허용 전이 강제
   db.py             SQLite 저장소 (SSOT, 원자적 전이 + 감사 로그)
+  budget.py         §38 프로바이더 일일 예산(RPD) 원장 및 AIMD 제어
+  scout.py          §39 카테고리 특화 모델 카탈로그 및 Scout 업데이트
   classifier.py     Light/Heavy 분류
   nlq.py            자연어 큐 관리 (queue ask / /queue/ask)
   hermes_client.py  Hermes :8642 API 클라이언트
@@ -695,3 +702,42 @@ alphred/
 poc/                Phase 0 primitive 검증
 tests/              핵심 로직 테스트
 ```
+
+---
+
+## TUI 사용 팁 및 가이드
+
+### 1. 카테고리별 모델 자동 라우팅 (`auto`) 활성화 및 사용법
+Alphred는 Heavy 작업을 9가지 카테고리로 분석하여 가장 알맞은 무료 모델로 자동 분기하는 기능을 갖추고 있습니다.
+- **활성화**: TUI 대화창에서 `/model high auto` 또는 `/model mid auto` 명령을 실행하면 해당 depth(심화도)의 모델 매핑이 `"auto"` 센티널로 설정됩니다.
+- **카탈로그 업데이트**: 카테고리별 매핑 목록을 최신화하려면, 셸(터미널)에서 `alphred queue scout-update` 명령을 실행하세요. 기본적으로 유료를 포함한 전체 최고 성능 모델(Claude 3.5 Sonnet, Gemini 2.5 Pro 등)을 평가 및 선정합니다. 만약 무료 모델로만 구성하고 싶다면 `alphred queue scout-update --free` 옵션으로 실행하세요. 자동으로 NVIDIA NIM 및 OpenRouter의 무료 모델 인벤토리를 실측 검증하고 사용 가능 제공자를 상세 출력(with `-v`)하며 로컬 카탈로그를 갱신합니다. 갱신된 매핑 정보는 TUI에서 `/model`을 치거나 CLI에서 `alphred model` 명령을 실행하여 이쁜 표 형태로 확인하실 수 있습니다.
+- **동작**: 이후 큐에 Heavy 작업이 추가되면 자동으로 분류(예: 코딩 질문 -> `coding`)되고, 스케줄러가 디스패치할 때 해당 카테고리에 특화된 모델로 매핑되어 실행됩니다.
+
+### 2. 동시(병렬) 실행 작업 설정 및 확인
+- **병렬 슬롯 개수 확인**: `Ctrl+T` 또는 `/queue` 명령으로 **큐 덱(Queue Deck)** 모달을 열면, 상단 헤더에 `▶ 실행 슬롯 (active_slots/max_slots)` 형태로 노출됩니다. 예: `▶ 실행 슬롯 (2/4)`는 전체 4개 병렬 슬롯 중 2개가 작업 진행 중임을 뜻합니다.
+- **병렬 실행 설정**: Alphred를 기동할 때 환경 변수 `ALPHRED_SLOTS` 값을 설정하세요.
+  ```bash
+  # 4개 작업을 동시에 병렬 수행하도록 설정
+  $env:ALPHRED_SLOTS="4"
+  # 대기 작업 수와 프로바이더의 속도 제한(RPM)에 맞춰 1~4개 사이에서 자동 조절
+  $env:ALPHRED_SLOTS="auto"
+  alphred serve
+  ```
+
+### 3. 작업 중 "확인 필요" 상태 처리 가이드
+확인 필요 상태는 큐의 작업 상태에 따라 크게 두 가지로 나뉩니다:
+
+- **입력 대기 (`AwaitingInput` - ❓ 배지)**:
+  - **원인**: 작업 착수 전 에이전트가 실행에 필수적인 추가 정보를 요청하는 단계입니다 (`ALPHRED_CLARIFY=1` 인테이크 모드 활성 시).
+  - **처리**: 큐 덱(`Ctrl+T`)에서 해당 작업을 선택한 뒤 단축키 `a`를 누르거나, TUI 입력창에 `/answer` (또는 `/answer <id>`)를 입력하면 **인테이크 질문 카드**가 소환됩니다. 여기서 추천 값을 선택하거나 직접 답변을 작성하면 작업이 Pending 상태로 변경되어 실행 대기열에 들어갑니다.
+  
+- **검토 필요 (`NeedsReview` - ⚠ 배지)**:
+  - **원인**: 작업 수행이 끝났으나 **자동 완료 기준(DoD/verify/judge) 검증을 통과하지 못했거나**, **태스크당 실행 예산(Hermes run 제한)을 초과**하여 정지된 상태입니다.
+  - **처리**: 큐 덱(`Ctrl+T`)의 우측 상세 패널(Detail)에 실패한 스텝 목록과 검증 검사 결과 및 에러 내용이 나타납니다. 확인 후 다음과 같이 대응할 수 있습니다:
+    - **`R` (재시도/Retry)**: 환경 또는 소스 코드를 수정한 뒤 작업을 다시 처음부터 실행합니다.
+    - **`d` (폐기/Discard)**: 작업을 대기열에서 제거(취소)합니다.
+    - **`r` (재개/Resume)**: 검증 실패를 무시하고 강제로 작업을 재개하여 다음 단계를 밟게 합니다.
+
+- **이전 작업 진행 상황 확인법**:
+  - `L` 단축키를 통한 **라이브(Live) 스트림 뷰**는 접속한 시점부터 발생하는 이벤트 스트림을 실시간 중계하므로 연결 전 과거 출력은 다시 보여주지 않습니다.
+  - 대신, TUI 대화창 내의 **인라인 작업 카드**의 진행바 또는 **큐 덱(`Ctrl+T`) 우측 상세 패널**을 통해 이미 완료된 계획(Plan) 스텝 목록과 각 스텝별 생성 파일 및 중간 출력을 스크롤하며 손쉽게 확인할 수 있습니다.

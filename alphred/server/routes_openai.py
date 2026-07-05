@@ -11,7 +11,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .. import classifier
 from ..models import TaskKind, TaskSource, TaskState
 from .deps import (GatewayDeps, STATE_TO_RUN, aiter, context_of, depth_ov, extract,
-                   make_auth, overrides, route_realtime, source, sse_event, submit)
+                   extract_attachments, make_auth, overrides, route_realtime, source,
+                   sse_event, submit)
 
 logger = logging.getLogger("alphred.gateway")
 
@@ -57,12 +58,14 @@ def build_router(deps: GatewayDeps) -> APIRouter:
         history = ch if isinstance(ch, list) else None
         # §34.2 A2 — 동봉된 conversation_history 를 의도 판정 맥락으로도 활용
         ctx = context_of({"messages": [*(history or []), {"role": "user", "content": text}]})
+        ctx = mgr.session_context(session_id, ctx)   # §40 세션 작업 원장 보완
         # §35.2 — 종결 시 webhook 알림(임베디드/외부 서비스가 폴링 없이 결과 수신)
         delivery = body.get("delivery") if isinstance(body.get("delivery"), dict) else None
         # runs 는 비동기 의미 → 큐 등록. kind/prio 미지정 시 분류기 자동 판정.
         task = submit(mgr, text, source=src, priority=prio, kind=kind,
                       session_key=session_id, conversation_history=history,
-                      depth=depth_ov(request), context=ctx, delivery=delivery)
+                      depth=depth_ov(request), context=ctx, delivery=delivery,
+                      attachments=extract_attachments(body))  # §37 이미지 보존
         payload = {"run_id": task.id, "status": STATE_TO_RUN.get(task.state, "queued"),
                    "kind": task.kind, "priority": task.priority,
                    "depth": task.depth, "session_id": session_id or task.id}
@@ -137,6 +140,7 @@ def build_router(deps: GatewayDeps) -> APIRouter:
         depth_in = body.get("depth") if body.get("depth") in ("low", "mid", "high") else None
         # §34.2 A2 — TUI 가 동봉한 최근 대화 맥락(IntentCard/인테이크 질문 입력에 사용)
         ctx = body.get("context") if isinstance(body.get("context"), str) else None
+        ctx = mgr.session_context(session_id, ctx)   # §40 세션 작업 원장 보완
         if not message:
             return StreamingResponse(aiter([sse_event("error", {"message": "empty message"})]),
                                      media_type="text/event-stream")

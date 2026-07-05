@@ -57,6 +57,21 @@ def make_hermes_clarify(client: HermesClient, model: str = "hermes-agent"):
     return _clarify
 
 
+def make_hermes_rewrite(client: HermesClient, model: str = "hermes-agent"):
+    """§40 지시어 해소 — 이전 작업을 참조하는 요청을 원장에 접지해 자기완결형으로 재작성.
+
+    반환: (prompt, ledger) -> resolved str | None. None/저신뢰면 호출측이 원문 유지
+    (fail-open — 원장 블록 주입만으로 진행).
+    """
+    def _rewrite(prompt: str, ledger: str):
+        text = _chat(client, model, classifier.build_rewrite_prompt(prompt, ledger))
+        r = classifier.parse_rewrite(text) if text is not None else None
+        if not r or r["confidence"] < classifier.REWRITE_MIN_CONFIDENCE:
+            return None
+        return r["resolved"]
+    return _rewrite
+
+
 def make_hermes_planner(client: HermesClient, model: str = "hermes-agent"):
     """요청을 하위작업으로 분해하는 콜러블(§19). 반환: prompt -> plan dict | None."""
     def _plan(prompt: str):
@@ -73,10 +88,10 @@ def make_hermes_planner_v2(client: HermesClient, model: str = "hermes-agent"):
     """
     def _plan2(prompt: str, *, capabilities: str | None = None, intent: dict | None = None,
                intake: str | None = None, draft: dict | None = None,
-               replan: str | None = None):
+               replan: str | None = None, context: str | None = None):
         text = _chat(client, model, classifier.build_planner_v2_prompt(
             prompt, capabilities=capabilities, intent=intent, intake=intake, draft=draft,
-            replan=replan))
+            replan=replan, context=context))
         return classifier.parse_plan_v2(text) if text is not None else None
     return _plan2
 

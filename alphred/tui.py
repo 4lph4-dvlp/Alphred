@@ -101,6 +101,11 @@ class AlphredTUI(CommandsMixin, QueueMixin, ChatMixin, App):
         self._live_tid: str | None = None  # §33 라이브 뷰 중인 작업 id
         self._live_worker = None           # 라이브 스트림 워커(Esc 로 취소)
         self._pending_input: dict | None = None  # §34.4 답변 모드 상태(task_id/questions/idx)
+        self.slots: int = 1
+        self.slots_config: str = "1"
+        self.slots_max: int = 4
+        self.active_slots: int = 0
+        self.budgets: dict = {}
 
     def compose(self) -> ComposeResult:
         # §36 T3: 상시 큐 패널 폐지 — 큐는 상태줄 배지 + 인라인 TaskCard + 큐 덱(ctrl+t).
@@ -157,9 +162,19 @@ class AlphredTUI(CommandsMixin, QueueMixin, ChatMixin, App):
 
     # ---- 웰컴 패널(§36 D2) ----
     def _welcome_renderable(self) -> Text:
-        """mini 로고('A') + 정보 스택. 전체 배너 아트는 /banner 로."""
-        art = banner_lines(8)                      # mini 변형(8칸 'A')
-        artw = max((len(a.plain) for a in art), default=0)
+        """가용 폭/높이에 맞는 배너 및 로고 + 정보 스택."""
+        from .splash import banner_lines, logo_lines
+        w = self.size.width if self.size.width > 0 else 80
+        h = self.size.height if self.size.height > 0 else 24
+
+        # Determine banner (responsive)
+        art = banner_lines(w)
+
+        # Determine logo (if height is reasonably large, e.g. >= 22)
+        logo = []
+        if h >= 22:
+            logo = logo_lines(w, avail_height=h - 12)
+
         ver = _pkg_version()
         info = [
             Text.from_markup(f"[b {_ACCENT}]◆ Alphred[/] [b]{ver}[/]"
@@ -173,14 +188,27 @@ class AlphredTUI(CommandsMixin, QueueMixin, ChatMixin, App):
             Text.from_markup("[dim]/plan 드라이런 · /queue 큐 관리 · /sessions 세션 · "
                              "/banner 전체 로고[/]"),
         ]
+
         out = Text()
-        for i in range(max(len(art), len(info))):
-            a = art[i] if i < len(art) else Text("")
-            a.pad_right(artw - len(a.plain) + 2)
-            out.append_text(a)
-            if i < len(info):
-                out.append_text(info[i])
+        out.append("\n")
+        # Banner
+        for line in art:
+            out.append_text(line)
             out.append("\n")
+        out.append("\n")
+
+        # Logo
+        if logo:
+            for line in logo:
+                out.append_text(line)
+                out.append("\n")
+            out.append("\n")
+
+        # Info
+        for line in info:
+            out.append_text(line)
+            out.append("\n")
+
         return out
 
     def _mount_welcome(self) -> None:
@@ -212,13 +240,22 @@ class AlphredTUI(CommandsMixin, QueueMixin, ChatMixin, App):
         else:
             left = f"[dim]{self._status_text}[/]"
         sep = "  [dim]│[/]  "
-        parts = [left, self._badges, f"[dim]depth:[/]{self.depth_override or 'auto'}"]
+        is_auto = str(self.slots_config).lower() == "auto"
+        slot_label = f"[dim]slots:[/]{self.active_slots}/{self.slots}"
+        if is_auto:
+            slot_label += "⚡"
+        parts = [left, self._badges, f"[dim]depth:[/]{self.depth_override or 'auto'}", slot_label]
         # §36 T4 저폭 반응형: 좁은 터미널에선 모델·세션을 접어 배지/상태를 보존.
         if self.size.width >= 80:
             m = model_short(self._model_label)
             if m:
                 parts.append(f"[dim]모델[/] {m}")
             parts.append(f"[dim]세션[/] {self._session_label()}")
+            or_budget = self.budgets.get("openrouter", {})
+            nv_budget = self.budgets.get("nvidia", {})
+            or_rem = or_budget.get("remaining", 50)
+            nv_rem = nv_budget.get("remaining", 100)
+            parts.append(f"[dim]budget:[/] OR:{or_rem} NV:{nv_rem}")
         try:
             self._statusbar_w.update(sep.join(parts))
         except Exception:
@@ -242,15 +279,40 @@ class AlphredTUI(CommandsMixin, QueueMixin, ChatMixin, App):
     async def _update_model_display(self) -> None:
         """현재 사용 모델 라벨을 갱신하고 상태줄/웰컴 재구성(세션 전환 모델 우선)."""
         model, prov = self.model, None
+        has_tiers = False
+        tiers = {}
         try:
             d = (await self.http.get("/models/available")).json()
             model = self.model or d.get("current")
             prov = d.get("provider")
-            self._model_names = d.get("models") or []   # §36 I4 인자 완성 캐시
+            models_list = d.get("models") or []
+            if models_list and isinstance(models_list[0], dict):
+                self._model_names = [m["id"] for m in models_list]
+            else:
+                self._model_names = models_list
+            has_tiers = d.get("has_tiers", False)
+            tiers = d.get("tiers") or {}
         except Exception:
             pass
-        label = model or "(config 기본값)"
-        if prov:
+
+        # 세션별 강제 전환 모델이 없고, depth별 모델 라우팅이 설정되어 있다면 라우팅 정보 표시
+        if not self.model and has_tiers:
+            t_models = []
+            for t in ("high", "mid", "low"):
+                t_spec = tiers.get(t)
+                if t_spec and t_spec.get("model"):
+                    t_models.append(t_spec["model"])
+            if t_models:
+                if all(m == "auto" for m in t_models):
+                    label = "auto (카테고리 자동 라우팅)"
+                else:
+                    label = f"depth 라우팅 ({'/'.join(t_models)})"
+            else:
+                label = model or "(config 기본값)"
+        else:
+            label = model or "(config 기본값)"
+
+        if prov and not label.startswith("auto") and not label.startswith("depth"):
             label += f"  [{prov}]"
         self._model_label = label
         self._set_titlebar()

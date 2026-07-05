@@ -20,10 +20,13 @@ from pathlib import Path
 
 from . import capabilities as capabilities_mod
 from . import classifier, queue_md, safety
+from . import ledger as ledger_mod
 from .prompt import (autonomous_input, append_preference, default_prompt_text,
                      intake_block, load_preferences, step_input)
 from .verify import failure_suggestion, verify_artifacts, verify_step
 from .db import Store, new_id
+from .budget import BUDGET_DEFAULTS
+from .config import Config
 from .hermes_client import HermesClient, run_outcome
 from .models import Task, TaskKind, TaskSource, TaskState
 from .safety import BlockedPayloadError
@@ -72,6 +75,13 @@ class _LightMarker:
     priority = 10
 
 
+def _task_log_path(alphred_home: Path, task_id: str) -> Path:
+    """작업 이벤트 로그 JSONL 경로."""
+    d = alphred_home / "task_logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{task_id}.jsonl"
+
+
 class QueueManager:
     def __init__(self, store: Store, client: HermesClient, queue_md_path: Path,
                  max_slots: int = 1, max_retries: int = 3, retry_base_seconds: float = 5.0,
@@ -82,11 +92,15 @@ class QueueManager:
                  clarify=None, clarify_timeout: float = 600.0, planner2=None,
                  orchestrate: bool = False, task_budget: int = 25, step_retries: int = 2,
                  watchdog: bool = False, stall_seconds: float = 600.0,
-                 tool_fail_limit: int = 3, prefs_path: Path | None = None):
+                 tool_fail_limit: int = 3, prefs_path: Path | None = None,
+                 rewrite=None, ledger_enabled: bool = True, cfg: Config | None = None):
         self.store = store
         self.client = client
         self.queue_md_path = Path(queue_md_path)
-        self.max_slots = max_slots
+        self.cfg = cfg
+        self.config_slots = cfg.slots if cfg else str(max_slots)
+        self.config_slots_max = cfg.slots_max if cfg else 4
+        self._max_slots = max_slots
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
         # 모호한 입력을 분류하는 선택적 LLM 콜러블: prompt -> (kind, prio, reason)|None
@@ -140,6 +154,10 @@ class QueueManager:
         self._last_event: dict[str, float] = {}
         # §34.4 C3 선호 기억 — 인테이크 답변 축적 파일(clarify 재질문 방지 + 실행 주입).
         self.prefs_path = prefs_path
+        # §40 세션 연속성 — 원장(무LLM, 분류/계획/실행 주입) + 지시어 해소 재작성(opt-in).
+        # rewrite(prompt, ledger)->resolved str|None. 실패/저신뢰는 원문 유지(fail-open).
+        self.rewrite = rewrite
+        self.ledger_enabled = ledger_enabled
         # 업스트림(Hermes :8642) 준비 게이트(D1). 매 틱 직접 호출 → 별도 watcher 스레드/플래그
         # 없이 단일 경로로 health 를 평가(갇힘 상태 제거). None 이면 게이트 없음(항상 가동 가정).
         # 반환: True=가동(처리 진행) / False=미가동(이번 틱 시작 보류, 폐기 아님; 다음 틱 재평가).
@@ -152,6 +170,50 @@ class QueueManager:
         self.halted = False
         self.halt_reason = ""
 
+    @property
+    def max_slots(self) -> int:
+        if self.config_slots.lower() == "auto":
+            # auto = min(Runnable 수, 프로바이더 예산 허용치 합, ALPHRED_SLOTS_MAX)
+            now = datetime.now(timezone.utc).isoformat()
+            runnable = [
+                t for t in self.store.list()
+                if (t.state == TaskState.PENDING.value or 
+                    (t.state == TaskState.PAUSED.value and t.paused_reason != Store.USER_HOLD))
+                and (not t.retry_not_before or t.retry_not_before <= now)
+            ]
+            pending_count = len(runnable)
+
+            unique_pairs = set()
+            for depth in ("high", "mid", "low"):
+                if self.cfg:
+                    p, m = self.cfg.resolve_provider_and_model(depth)
+                else:
+                    p, m = "hermes", "hermes-agent"
+                unique_pairs.add((p, m))
+
+            sum_caps = 0
+            for p, m in unique_pairs:
+                limit_spec = BUDGET_DEFAULTS.get(p, BUDGET_DEFAULTS["hermes"])
+                rpm = limit_spec["rpm"]
+                est_run_rpm = limit_spec["est_run_rpm"]
+                cap = max(1, int(rpm // est_run_rpm))
+                sum_caps += cap
+
+            return max(1, min(pending_count, sum_caps, self.config_slots_max))
+        else:
+            try:
+                return max(1, int(self.config_slots))
+            except (ValueError, TypeError):
+                return self._max_slots
+
+    @max_slots.setter
+    def max_slots(self, val):
+        self.config_slots = str(val)
+        try:
+            self._max_slots = int(val)
+        except (ValueError, TypeError):
+            pass
+
     # ---- 제출/분류 ----
     def submit(self, prompt: str, *, source: str = TaskSource.API.value,
                priority: int | None = None, kind: str | None = None,
@@ -159,7 +221,8 @@ class QueueManager:
                conversation_history: list | None = None,
                plan: dict | None = None, classify_reason: str | None = None,
                depth: str | None = None, intent: dict | None = None,
-               context: str | None = None) -> Task:
+               context: str | None = None,
+               attachments: list | None = None) -> Task:
         # 안전망: 자기 수명주기를 건드리는 명령은 큐 진입 차단(#30719)
         matched = safety.scan_payload(prompt)
         if matched:
@@ -175,6 +238,23 @@ class QueueManager:
                 prompt, source=source, explicit_priority=priority, explicit_kind=kind,
                 context=context,
             )
+        # §40 지시어 해소 — 이전 작업을 참조하는 Heavy 요청을 자기완결형으로 재작성.
+        # 트리거: IntentCard(refers_to_previous) 또는 결정적 휴리스틱. 원장이 비어있으면
+        # 참조할 것이 없으므로 콜 없음. 실패/저신뢰는 원문 유지(fail-open — 원장 주입만).
+        resolved = None
+        if (self.rewrite is not None and k == TaskKind.HEAVY.value and session_key
+                and ((intent or {}).get("refers_to_previous")
+                     or ledger_mod.looks_referential(prompt))):
+            lb = self._session_ledger(session_key)
+            if lb:
+                try:
+                    r = self.rewrite(prompt, lb)
+                    if r and r.strip() and r.strip() != prompt.strip():
+                        resolved = r.strip()
+                        logger.info("rewrite: 지시어 해소 적용 (%d→%d자)",
+                                    len(prompt), len(resolved))
+                except Exception as e:
+                    logger.warning("rewrite 실패(원문 유지): %s", e)
         # §21 작업 심화도 — 사용자 명시 오버라이드(/depth, X-Alphred-Depth) 우선,
         # 다음은 IntentCard 판정(§34.2), 없으면 계획 기반 자동 판정.
         if depth not in ("low", "mid", "high"):
@@ -207,14 +287,24 @@ class QueueManager:
                 state = TaskState.AWAITING_INPUT.value
                 deadline = (datetime.now(timezone.utc)
                             + timedelta(seconds=self.clarify_timeout)).isoformat()
+        # Determine category (Enum 9종)
+        cat = (intent or {}).get("category") if intent else None
+        if not cat:
+            cat = classifier.heuristic_category(prompt)
+
         with self._lock:
             task = Task(
                 id=new_id(), source=source, kind=k, priority=prio,
                 state=state, prompt=prompt,
+                resolved_prompt=resolved,     # §40 계획/실행/검증은 해소본 기준(원문 보존)
                 session_key=session_key,
+                category=cat,                 # §39 작업 카테고리
                 # 맥락 핸드오프(P3): TUI 직전 대화를 백그라운드 실행에 동봉
                 conversation_history=(json.dumps(conversation_history, ensure_ascii=False)
                                       if conversation_history else None),
+                # §37 멀티모달 보존 — 이미지 파트를 큐에 저장해 디스패치 시 재동봉
+                attachments=(json.dumps(attachments, ensure_ascii=False)
+                             if attachments else None),
                 delivery=json.dumps(delivery, ensure_ascii=False) if delivery else None,
                 classify_reason=reason, depth=depth,
                 plan=json.dumps(plan, ensure_ascii=False) if plan else None,
@@ -244,6 +334,34 @@ class QueueManager:
             return self.capabilities.snapshot().get("formats")
         except Exception:
             return None
+
+    # ---- §40 세션 연속성 ----
+    def _session_ledger(self, session_key: str | None) -> str | None:
+        """세션의 최근 종결 작업 원장 블록(무LLM, fail-open). 없으면 None."""
+        if not (self.ledger_enabled and session_key):
+            return None
+        try:
+            return ledger_mod.ledger_block(
+                self.store.recent_finished(session_key, limit=ledger_mod.LEDGER_LIMIT))
+        except Exception:
+            return None
+
+    def session_context(self, session_key: str | None,
+                        base: str | None = None) -> str | None:
+        """분류(IntentCard)용 맥락 = 클라이언트 대화 맥락 + 세션 작업 원장(§40).
+
+        게이트웨이가 classify/submit 의 context 인자를 만들 때 호출한다. Heavy 결과는
+        비동기 완료라 클라이언트 messages 에 없을 수 있어 서버측 원장이 이를 보완한다.
+        """
+        lb = self._session_ledger(session_key)
+        if not lb:
+            return base
+        return (base + "\n\n" + lb) if base else lb
+
+    @staticmethod
+    def _effective_prompt(task: Task) -> str:
+        """계획·실행·검증의 기준 요청 — §40 해소본이 있으면 그것(원문은 감사용 보존)."""
+        return getattr(task, "resolved_prompt", None) or task.prompt
 
     def _get_clarify(self, prompt: str, card: dict | None,
                      context: str | None = None) -> dict | None:
@@ -424,7 +542,8 @@ class QueueManager:
         return card
 
     def _get_plan_v2(self, prompt: str, *, intent: dict | None = None,
-                     intake: str | None = None, draft: dict | None = None) -> dict | None:
+                     intake: str | None = None, draft: dict | None = None,
+                     context: str | None = None) -> dict | None:
         """Plan v2 생성(§34.3) — 능력 인벤토리 접지 + 결정적 갭 수리 + 캐시. 실패는 None.
 
         접지: 플래너 프롬프트에 콤팩트 인벤토리를 동봉하고, 반환된 계획을 실물과 대조해
@@ -433,7 +552,7 @@ class QueueManager:
         """
         if self.planner2 is None:
             return None
-        key = ((prompt or "").strip(), (intake or "")[:400])
+        key = ((prompt or "").strip(), (intake or "")[:400], (context or "")[:400])
         if key in self._plan2_cache:
             return self._plan2_cache[key]
         caps_ctx, snapshot = None, None
@@ -445,7 +564,7 @@ class QueueManager:
                 snapshot = None
         try:
             plan = self.planner2(prompt, capabilities=caps_ctx, intent=intent,
-                                 intake=intake, draft=draft)
+                                 intake=intake, draft=draft, context=context)
         except Exception as e:
             logger.warning("Plan v2 생성 실패(계획 없이 실행): %s", e)
             return None
@@ -493,7 +612,12 @@ class QueueManager:
             # §29.1 동기 Light 응답은 light tier 모델로(설정된 경우). Heavy 미시작 불변식 하 안전.
             if self.apply_model is not None:
                 try:
-                    self.apply_model("low")
+                    self.apply_model("low", "general")
+                except TypeError:
+                    try:
+                        self.apply_model("low")
+                    except Exception as e:
+                        logger.debug("Light 모델 라우팅 적용 실패: %s", e)
                 except Exception as e:
                     logger.debug("Light 모델 라우팅 적용 실패: %s", e)
 
@@ -659,6 +783,73 @@ class QueueManager:
     def _slots_free(self) -> int:
         return self.max_slots - len(self.store.in_progress())
 
+    def _next_runnable_gated(self) -> Task | None:
+        """세션 직렬화 게이트 및 프로바이더/모델 캐패시티 한도를 적용하여 다음 실행할 작업을 찾는다(§38.2 G/D)."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        # 1) 현재 실행 중인 작업들
+        active = self.store.in_progress()
+        active_sessions = {t.session_key for t in active if t.session_key}
+
+        # 2) 현재 실행 중인 각 프로바이더/모델별 run 카운트 계산
+        active_counts: dict[tuple[str, str], int] = {}
+        for t in active:
+            if self.cfg:
+                p, m = self.cfg.resolve_provider_and_model(t.depth, t.category)
+            else:
+                p, m = "hermes", "hermes-agent"
+            active_counts[(p, m)] = active_counts.get((p, m), 0) + 1
+
+        # 3) DB에서 Runnable 후보들 전체 조회 (우선순위 DESC, 생성일 ASC 순)
+        candidates = [
+            t for t in self.store.list()
+            if (t.state == TaskState.PENDING.value or 
+                (t.state == TaskState.PAUSED.value and t.paused_reason != Store.USER_HOLD))
+            and (not t.retry_not_before or t.retry_not_before <= now)
+        ]
+
+        # candidates 는 priority DESC, created_at ASC 순이므로, 조건에 맞는 첫 번째를 리턴.
+        for t in candidates:
+            # 세션 직렬화 게이트: 동일 세션의 작업이 이미 실행 중이면 제외
+            if t.session_key and t.session_key in active_sessions:
+                continue
+
+            # §38 P3: reasoning_effort 게이트 — route에 reasoning이 설정되어 있으면 전역 config.yaml을 공유하므로
+            # 다른 reasoning effort 요구치가 이미 가동 중이면 충돌 방지를 위해 대기
+            if self.cfg and self.cfg.has_reasoning_tiers():
+                candidate_r = self.cfg.reasoning_for_depth(t.depth)
+                candidate_r_val = candidate_r if candidate_r is not None else self.cfg.reasoning_base_default() or ""
+
+                conflict = False
+                for act in active:
+                    act_r = self.cfg.reasoning_for_depth(act.depth)
+                    act_r_val = act_r if act_r is not None else self.cfg.reasoning_base_default() or ""
+                    if act_r_val != candidate_r_val:
+                        conflict = True
+                        break
+                if conflict:
+                    continue
+
+            # 프로바이더 cap 게이트: 해당 프로바이더/모델의 동시 run 수 한도 확인
+            if self.cfg:
+                p, m = self.cfg.resolve_provider_and_model(t.depth, t.category)
+                from .budget import check_rpd_limit, get_current_capacity
+                # RPD 일일 한도 체크
+                if check_rpd_limit(self.cfg.alphred_home, p):
+                    continue
+                # AIMD 동적 슬롯 체크
+                cap = get_current_capacity(self.cfg.alphred_home, p)
+            else:
+                p, m = "hermes", "hermes-agent"
+                cap = 5
+
+            if active_counts.get((p, m), 0) >= cap:
+                continue  # 한도 초과 -> 다음 후보로
+
+            return t
+
+        return None
+
     def _preempt(self, victim: Task, by: Task) -> None:
         """진행 중 작업을 선점하여 Paused 로 전환(컨텍스트 보존)."""
         if victim.hermes_run_id:
@@ -685,8 +876,40 @@ class QueueManager:
         if challenger is None:
             return
         victim = min(active, key=lambda t: t.priority)
-        if challenger.priority > victim.priority:  # 동급/저순위는 선점하지 않음(QA-4.4)
-            self._preempt(victim, challenger)
+        if challenger.priority <= victim.priority:  # 동급/저순위는 선점하지 않음(QA-4.4)
+            return
+
+        # 세션 직렬화 게이트: challenger 가 victim 이 아닌 다른 active task 와 session 이 겹치면 선점 불가
+        other_active_sessions = {t.session_key for t in active if t.id != victim.id and t.session_key}
+        if challenger.session_key and challenger.session_key in other_active_sessions:
+            return
+
+        # 프로바이더 cap 게이트: victim 이 멈춘다고 가정했을 때의 active_counts 계산
+        active_counts: dict[tuple[str, str], int] = {}
+        for t in active:
+            if t.id == victim.id:
+                continue
+            if self.cfg:
+                p, m = self.cfg.resolve_provider_and_model(t.depth)
+            else:
+                p, m = "hermes", "hermes-agent"
+            active_counts[(p, m)] = active_counts.get((p, m), 0) + 1
+
+        # challenger 의 provider, model
+        if self.cfg:
+            p_c, m_c = self.cfg.resolve_provider_and_model(challenger.depth)
+        else:
+            p_c, m_c = "hermes", "hermes-agent"
+
+        limit_spec = BUDGET_DEFAULTS.get(p_c, BUDGET_DEFAULTS["hermes"])
+        rpm = limit_spec["rpm"]
+        est_run_rpm = limit_spec["est_run_rpm"]
+        cap = max(1, int(rpm // est_run_rpm))
+
+        if active_counts.get((p_c, m_c), 0) >= cap:
+            return  # 한도 초과 -> 선점 불가
+
+        self._preempt(victim, challenger)
 
     def _start(self, task: Task) -> None:
         # Pending(신규) 또는 Paused(재개) 모두 In-Progress 로 전환. 상태머신이 둘 다 허용.
@@ -700,9 +923,15 @@ class QueueManager:
         if resuming:
             logger.info("resume %s (prio %s)", task.id[:8], task.priority)
         # §29.1 이 run 이 읽을 Hermes config.default 를 작업 심화도에 맞는 모델로 맞춘다(있으면).
+        model = "hermes-agent"
         if self.apply_model is not None:
             try:
-                self.apply_model(task.depth)
+                model = self.apply_model(task.depth, task.category) or "hermes-agent"
+            except TypeError:
+                try:
+                    model = self.apply_model(task.depth) or "hermes-agent"
+                except Exception as e:
+                    logger.warning("모델 라우팅 적용 실패(기본 모델 유지) %s: %s", task.id[:8], e)
             except Exception as e:
                 logger.warning("모델 라우팅 적용 실패(기본 모델 유지) %s: %s", task.id[:8], e)
         # §34.5 능력 인벤토리({{CAPABILITIES}} 주입) + §34.4 인테이크/선호 블록 — 공용 헬퍼.
@@ -719,8 +948,9 @@ class QueueManager:
                     intent_card = json.loads(task.intent)
                 except Exception:
                     intent_card = None
-            p2 = self._get_plan_v2(task.prompt, intent=intent_card,
-                                   intake=intake or None, draft=plan)
+            p2 = self._get_plan_v2(self._effective_prompt(task), intent=intent_card,
+                                   intake=intake or None, draft=plan,
+                                   context=self._session_ledger(task.session_key))
             if p2:
                 plan = p2
                 self.store.update_fields(task.id, plan=json.dumps(p2, ensure_ascii=False))
@@ -732,15 +962,21 @@ class QueueManager:
             self.sync_md()
             return
         try:
+            if self.cfg:
+                p, m = self.cfg.resolve_provider_and_model(task.depth, task.category)
+                from .budget import record_request
+                record_request(self.cfg.alphred_home, p)
             run_id = self.client.start_run(
                 # §26 하네스 + §34.5 능력 + §19 계획 힌트 + §34.4 인테이크
                 # + 심화도 지시 + (재시도면) §21 검증 피드백
-                autonomous_input(task.prompt, plan, task.verify_feedback,
+                autonomous_input(self._effective_prompt(task), plan, task.verify_feedback,
                                  harness=self.system_prompt, depth=task.depth,
                                  capabilities=caps_text, intake=intake or None),
                 conversation_history=history,
                 previous_response_id=None if history else task.response_id,
                 session_id=task.session_key or task.id,
+                attachments=self._task_attachments(task),   # §37 이미지 재동봉
+                model=model,
             )
             self.store.update_fields(task.id, hermes_run_id=run_id)
             logger.info("start %s -> run %s", task.id[:8], run_id)
@@ -750,6 +986,17 @@ class QueueManager:
             logger.warning("start 실패 %s: %s", task.id[:8], exc)
             self._handle_failure(task, str(exc))
         self.sync_md()
+
+    @staticmethod
+    def _task_attachments(task: Task) -> list | None:
+        """저장된 멀티모달 파트(§37) 파싱 — 없거나 손상이면 None(fail-open)."""
+        if not getattr(task, "attachments", None):
+            return None
+        try:
+            v = json.loads(task.attachments)
+            return v if isinstance(v, list) and v else None
+        except Exception:
+            return None
 
     # ---- §34.6 StepRunner — high 심화도 Plan v2 의 스텝 단위 실행·검증 ----
     @staticmethod
@@ -812,6 +1059,11 @@ class QueueManager:
                 intake = ((intake + "\n\n") if intake else "") + \
                     "[USER PREFERENCES — apply when relevant, unless the request says " \
                     "otherwise]\n" + prefs
+        # §40 세션 작업 원장 — 이전 작업 요약·산출물 경로를 실행 입력에 동봉(단일/스텝 공용).
+        # "동일 형식으로" 류 참조와 이전 산출물 재활용의 접지. fail-open.
+        lb = self._session_ledger(task.session_key)
+        if lb:
+            intake = ((intake + "\n\n") if intake else "") + lb
         return caps_text, intake
 
     def _start_step(self, task: Task, plan: dict, *,
@@ -831,12 +1083,31 @@ class QueueManager:
                 self._save_plan(task.id, plan)
                 self._finalize_done(task, self._last_output(plan))
                 return
-        inp = step_input(task.prompt, plan, step, capabilities=caps_text,
+        inp = step_input(self._effective_prompt(task), plan, step, capabilities=caps_text,
                          intake=intake or None, feedback=step.get("feedback"))
         step["state"] = "running"
         plan["runs_used"] = used + 1
+        model = "hermes-agent"
+        if self.apply_model is not None:
+            try:
+                model = self.apply_model(task.depth, task.category) or "hermes-agent"
+            except TypeError:
+                try:
+                    model = self.apply_model(task.depth) or "hermes-agent"
+                except Exception as e:
+                    logger.warning("스텝 모델 라우팅 적용 실패(기본 모델 유지) %s: %s", task.id[:8], e)
+            except Exception as e:
+                logger.warning("스텝 모델 라우팅 적용 실패(기본 모델 유지) %s: %s", task.id[:8], e)
         try:
-            run_id = self.client.start_run(inp, session_id=task.session_key or task.id)
+            if self.cfg:
+                p, m = self.cfg.resolve_provider_and_model(task.depth, task.category)
+                from .budget import record_request
+                record_request(self.cfg.alphred_home, p)
+            # §37 스텝에도 이미지 재동봉 — 각 run 이 독립 대화라 어느 스텝이 이미지를
+            # 필요로 할지 알 수 없다(비용보다 정확성 우선).
+            run_id = self.client.start_run(inp, session_id=task.session_key or task.id,
+                                           attachments=self._task_attachments(task),
+                                           model=model)
             self.store.update_fields(
                 task.id, hermes_run_id=run_id,
                 plan_activity=("스텝: " + (step.get("goal") or ""))[:60])
@@ -940,8 +1211,9 @@ class QueueManager:
                 intent_card = None
         _, intake = self._run_context(task)
         try:
-            new_plan = self.planner2(task.prompt, capabilities=caps_ctx, intent=intent_card,
-                                     intake=intake or None, replan=replan_ctx)
+            new_plan = self.planner2(self._effective_prompt(task), capabilities=caps_ctx,
+                                     intent=intent_card, intake=intake or None,
+                                     replan=replan_ctx)
         except Exception as e:
             logger.warning("replan 실패(부분성공 경로로): %s", e)
             return None
@@ -1021,6 +1293,15 @@ class QueueManager:
                         ev = json.loads(line[5:].strip())
                     except Exception:
                         continue
+                    # §33+ 이벤트 로그 JSONL 저장
+                    if self.cfg:
+                        try:
+                            log_path = _task_log_path(self.cfg.alphred_home, task_id)
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                ev_record = {"ts": time.time(), **ev}
+                                f.write(json.dumps(ev_record, ensure_ascii=False) + "\n")
+                        except Exception:
+                            pass
                     self._last_event[task_id] = time.monotonic()   # E3 무진전 판정 근거
                     if self.event_bus is not None:      # §33 라이브 뷰로 팬아웃
                         self.event_bus.publish(task_id, ev)
@@ -1144,6 +1425,10 @@ class QueueManager:
                 continue  # 일시 오류 → 다음 tick 에 재시도
             outcome = run_outcome(run.get("status"))
             if outcome == "done":
+                if self.cfg:
+                    p, m = self.cfg.resolve_provider_and_model(task.depth, task.category)
+                    from .budget import increase_capacity
+                    increase_capacity(self.cfg.alphred_home, p)
                 if self.orchestrate and task.depth == "high":
                     # §34.6 스텝 run 종료 — 수용검사 후 다음 스텝/재시도/마감을 결정.
                     # (_finalize_step 은 v2 계획이 없으면 기존 경로로 위임 — 방어적)
@@ -1187,10 +1472,13 @@ class QueueManager:
                 if improved and improved.strip() and improved.strip() != (output or "").strip():
                     final = improved
                     report["moa"] = {"applied": True}
+            # §40 산출물 레지스트리 — 결과가 언급한 실존 파일 경로를 저장(원장·후속 참조).
+            arts = ledger_mod.extract_artifacts(final)
             self.store.transition(
                 task.id, TaskState.COMPLETED, reason="run completed",
                 result=final, verify_report=json.dumps(report, ensure_ascii=False),
                 plan_activity=None,
+                artifacts=(json.dumps(arts, ensure_ascii=False) if arts else None),
             )
             logger.info("completed %s (%s)", task.id[:8], report.get("summary"))
             # §34.5 설치/활성화류 작업이 끝나면 능력 스냅샷을 무효화 → 다음 조회가 새
@@ -1223,10 +1511,12 @@ class QueueManager:
             self._mark_needs_review(task, output, report, why)
 
     def _mark_needs_review(self, task: Task, output: str, report: dict, reason: str) -> None:
+        arts = ledger_mod.extract_artifacts(output)   # §40 부분 산출물도 후속 참조 가치
         self.store.transition(
             task.id, TaskState.NEEDS_REVIEW, reason="verify failed: " + reason,
             result=output, verify_report=json.dumps(report, ensure_ascii=False),
             plan_activity=None,
+            artifacts=(json.dumps(arts, ensure_ascii=False) if arts else None),
         )
         logger.warning("needs-review %s: %s", task.id[:8], reason)
         self.sync_md()
@@ -1274,7 +1564,7 @@ class QueueManager:
     def _run_judge(self, task: Task, output: str) -> dict | None:
         """LLM-judge 호출(fail-open) — 오류/불가 시 None 반환(통과로 처리)."""
         try:
-            v = self.judge(task.prompt, output)
+            v = self.judge(self._effective_prompt(task), output)  # §40 해소본이 DoD 기준
             if v:
                 logger.info("judge %s: %s (score=%s)", task.id[:8],
                             "pass" if v.get("passed") else "fail", v.get("score"))
@@ -1286,7 +1576,7 @@ class QueueManager:
     def _run_moa(self, task: Task, output: str) -> str | None:
         """§29.4 MoA 정제 호출(fail-open) — 오류/불가 시 None(원본 유지)."""
         try:
-            improved = self.moa(task.prompt, output)
+            improved = self.moa(self._effective_prompt(task), output)
             if improved:
                 logger.info("moa %s: 개선본 채택(%d→%d자)",
                             task.id[:8], len(output or ""), len(improved))
@@ -1321,6 +1611,10 @@ class QueueManager:
 
     def _handle_failure(self, task: Task, error: str) -> None:
         """실패 처리 — transient 면 백오프 후 재큐(QA-4.6), 아니면 폐기."""
+        if self.cfg and any(kw in error.lower() for kw in ("429", "resource_exhausted", "rate limit", "quota", "overloaded")):
+            p, m = self.cfg.resolve_provider_and_model(task.depth, task.category)
+            from .budget import decrease_capacity
+            decrease_capacity(self.cfg.alphred_home, p)
         if is_transient_error(error) and task.retries < self.max_retries:
             n = task.retries + 1
             backoff = self.retry_base_seconds * (2 ** (n - 1))
@@ -1405,7 +1699,7 @@ class QueueManager:
                 return
             self._maybe_preempt()
             while self._slots_free() > 0:
-                nxt = self.store.next_runnable()
+                nxt = self._next_runnable_gated()
                 if nxt is None:
                     break
                 self._start(nxt)

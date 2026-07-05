@@ -174,15 +174,20 @@ def task_detail_lines(d: dict) -> list[str]:
     return lines
 
 
-def deck_slot_line(tasks: list[dict]) -> str:
-    """단일 실행 슬롯 시각화(§36 Q4) — 누가 점유 중이고 대기 1순위가 누구인지."""
+def deck_slot_line(tasks: list[dict], slots: int = 1, active_slots: int = 0) -> str:
+    """실행 슬롯 시각화(§36 Q4, §38 P4) — 누가 점유 중이고 대기 1순위가 누구인지."""
     def head(t):
         return f"{t['id'][:8]} {(t.get('prompt') or '').replace(chr(10), ' ')[:32]}"
-    running = next((t for t in tasks if t.get("state") == "In-Progress"), None)
+    running = [t for t in tasks if t.get("state") == "In-Progress"]
     pend = [t for t in tasks if t.get("state") == "Pending"]
     pend.sort(key=lambda t: -int(t.get("priority") or 0))
-    line = (f"[{_INFO}]▶ 실행 슬롯:[/] {_esc(head(running))}" if running
-            else "[dim]▶ 실행 슬롯: (비어 있음)[/]")
+
+    if running:
+        heads = ", ".join(f"[{t['id'][:8]}]" for t in running)
+        line = f"[{_INFO}]▶ 실행 슬롯 ({active_slots}/{slots}):[/] {heads}"
+    else:
+        line = f"[dim]▶ 실행 슬롯 (0/{slots}): (비어 있음)[/]"
+
     if pend:
         line += f"   [dim]│ 대기 1순위: {_esc(head(pend[0]))} (우선 {pend[0].get('priority')})[/]"
     return line
@@ -193,8 +198,7 @@ class QueueDeck(ModalScreen):
     BINDINGS = [("escape", "close", "닫기"), ("a", "answer", "답변"),
                 ("p", "pause", "보류"), ("r", "resume", "재개"),
                 ("R", "retry", "재시도"), ("d", "discard", "폐기"),
-                ("plus", "prio_up", "우선↑"), ("minus", "prio_down", "우선↓"),
-                ("L", "live", "라이브")]
+                ("plus", "prio_up", "우선↑"), ("minus", "prio_down", "우선↓")]
     DEFAULT_CSS = f"""
     QueueDeck {{ align: center middle; }}
     #deck-box {{ width: 95%; height: 85%; border: round {_AMBER}; padding: 0 1; }}
@@ -217,8 +221,8 @@ class QueueDeck(ModalScreen):
                 yield OptionList(id="deck-list")
                 with VerticalScroll(id="deck-detail"):
                     yield Static("[dim]작업을 선택하세요.[/]", id="deck-detail-body")
-            yield Static("↑↓ 이동 · a 답변 · p 보류 · r 재개 · +/- 우선순위 · "
-                         "R 재시도 · d 폐기 · L 라이브 · Esc 닫기", id="deck-keys")
+            yield Static("↑↓ 이동 · Enter 상세/라이브 · a 답변 · p 보류 · r 재개 · "
+                         "+/- 우선순위 · R 재시도 · d 폐기 · Esc 닫기", id="deck-keys")
 
     def on_mount(self) -> None:
         self.query_one("#deck-list", OptionList).focus()
@@ -226,13 +230,16 @@ class QueueDeck(ModalScreen):
 
     async def _load(self) -> None:
         try:
-            tasks = (await self.app.http.get("/queue")).json().get("tasks", [])
+            res = (await self.app.http.get("/queue")).json()
+            tasks = res.get("tasks", [])
+            slots = res.get("slots", 1)
+            active_slots = res.get("active_slots", 0)
         except Exception as e:
             self.query_one("#deck-slot", Static).update(f"[{_ERR}]큐 조회 실패: {e}[/]")
             return
-        self.set_tasks(tasks)
+        self.set_tasks(tasks, slots=slots, active_slots=active_slots)
 
-    def set_tasks(self, tasks: list[dict]) -> None:
+    def set_tasks(self, tasks: list[dict], slots: int = 1, active_slots: int = 0) -> None:
         """리스트/슬롯 갱신(열 때 + 2s 폴링 훅에서 호출) — 하이라이트는 작업 id 로 유지."""
         active = [t for t in tasks if t["state"] in _ACTIVE_STATES]
         active.sort(key=lambda t: -int(t.get("priority") or 0))
@@ -244,7 +251,7 @@ class QueueDeck(ModalScreen):
             slot = self.query_one("#deck-slot", Static)
         except Exception:
             return
-        slot.update(deck_slot_line(tasks))
+        slot.update(deck_slot_line(tasks, slots=slots, active_slots=active_slots))
         prev_tid = None
         if ol.highlighted is not None and 0 <= ol.highlighted < ol.option_count:
             prev_tid = ol.get_option_at_index(ol.highlighted).id
@@ -275,9 +282,19 @@ class QueueDeck(ModalScreen):
             self.run_worker(self._load_detail(tid), exclusive=True)
 
     def on_option_list_option_selected(self, event) -> None:
-        event.stop()                       # Enter = 상세 새로고침
-        tid = getattr(event.option, "id", None)
-        if tid:
+        event.stop()
+        t = self._current()
+        if not t:
+            return
+        state = t.get("state", "")
+        tid = t["id"]
+        if state == "In-Progress":
+            self.dismiss(None)
+            self.app._start_history_live(tid)
+        elif state in ("Completed", "NeedsReview", "Discarded"):
+            self.dismiss(None)
+            self.app._start_history_view(tid)
+        else:
             self.run_worker(self._load_detail(tid), exclusive=True)
 
     async def _load_detail(self, tid: str) -> None:
@@ -340,11 +357,7 @@ class QueueDeck(ModalScreen):
             self.dismiss(None)
             self.app.run_worker(self.app.cmd_answer(t["id"][:8]))
 
-    def action_live(self) -> None:
-        t = self._current()
-        if t and t.get("state") == "In-Progress":
-            self.dismiss(None)
-            self.app._start_live(t["id"])
+
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -452,10 +465,22 @@ class QueueMixin:
         self._begin_answer_mode({"id": t["id"], "questions": qs})
 
     # ---- Heavy 실행 라이브 뷰(§33/2A) — 진행 과정(회색) 실시간, 최종 결과(흰색) ----
-    def _start_live(self, tid: str) -> None:
-        self.stop_live()                       # 기존 라이브 중단
+    # ---- Heavy 실행 라이브 뷰(§33/2A) — 진행 과정(회색) 실시간, 최종 결과(흰색) ----
+    def _start_history_live(self, tid: str) -> None:
+        """과거 히스토리 로드 + 이어서 라이브 스트리밍."""
+        self.stop_live()
         self._live_tid = tid
-        self._live_worker = self._live_run(tid)
+        self._live_worker = self._history_live_run(tid)
+
+    def _start_live(self, tid: str) -> None:
+        """이전 버전과의 호환성을 위한 프록시."""
+        self._start_history_live(tid)
+
+    def _start_history_view(self, tid: str) -> None:
+        """완료된 작업의 전체 히스토리 표시."""
+        self.stop_live()
+        self._live_tid = tid
+        self._live_worker = self._history_view_run(tid)
 
     def stop_live(self) -> None:
         w = getattr(self, "_live_worker", None)
@@ -469,12 +494,33 @@ class QueueMixin:
         self._clear_stream()
 
     @work(exclusive=False)
-    async def _live_run(self, tid: str) -> None:
+    async def _history_live_run(self, tid: str) -> None:
+        """과거 이벤트 렌더링 후 라이브 스트리밍 연결."""
         import json
-        self._log(f"[dim]▶ 라이브: 작업 {tid[:8]} — 사고·도구 과정을 실시간 표시(회색), "
-                  f"최종 결과는 흰색. Esc 로 복귀[/]")
+        self._log(f"[dim]▶ 작업 {tid[:8]} — 진행 기록 로드 중...[/]")
         self._clear_stream()
         self._open_tools = []
+        
+        # 1단계: 과거 히스토리 로드 및 렌더링
+        try:
+            res = (await self.http.get(f"/queue/{tid}/history")).json()
+            events = res.get("events", [])
+        except Exception as e:
+            self._log(f"[dim]히스토리 로드 실패: {e}[/]")
+            events = []
+        
+        if events:
+            self._log(f"[dim]── 진행 기록 ({len(events)}건) ──────────────────────[/]")
+            for ev in events:
+                name = ev.get("event")
+                if name in ("tool.started", "tool.completed", "tool.failed",
+                            "assistant.delta", "assistant.completed", "reasoning"):
+                    self._render_run_event(name, ev, record=False)
+            self._clear_stream()  # 히스토리 렌더 후 스트림 버퍼 초기화
+            self._open_tools = []
+        
+        # 2단계: 실시간 스트리밍 연결
+        self._log(f"[dim]── 실시간 ──────────────────────────────────[/]")
         try:
             async with self.http.stream("GET", f"/queue/{tid}/stream") as resp:
                 if resp.status_code != 200:
@@ -494,7 +540,6 @@ class QueueMixin:
                         except Exception:
                             d = {}
                         if event == "done":
-                            # assistant.completed 를 못 받았으면 남은 결과를 최종(흰색)으로 확정
                             if self._proc_buf.strip():
                                 self._flush_proc(final=True, text=(d.get("result") or None),
                                                  record=False)
@@ -505,11 +550,62 @@ class QueueMixin:
                             break
                         if event == "state":
                             self._log(f"[dim]상태: {d.get('state')}[/]")
-                        else:                        # 도구/사고/텍스트/완료 — 공용 렌더러(회색/흰색)
+                        else:
                             self._render_run_event(event, d, record=False)
                         event, data = None, []
         except Exception as e:
             self._log(f"[{_ERR}]라이브 오류: {e}[/]")
+
+    @work(exclusive=False)
+    async def _history_view_run(self, tid: str) -> None:
+        """완료된 작업의 전체 히스토리 + 결과 표시."""
+        import json
+        self._clear_stream()
+        self._open_tools = []
+        
+        # 작업 상세 조회
+        try:
+            detail = (await self.http.get(f"/queue/{tid}")).json()
+        except Exception as e:
+            self._log(f"[{_ERR}]작업 조회 실패: {e}[/]")
+            return
+        
+        state = detail.get("state", "")
+        state_label = "✓" if state == "Completed" else "⚠" if state == "NeedsReview" else "✗"
+        self._log(f"[dim]▶ 작업 {tid[:8]} — {state} {state_label}[/]")
+        
+        # 히스토리 로드
+        try:
+            res = (await self.http.get(f"/queue/{tid}/history")).json()
+            events = res.get("events", [])
+        except Exception:
+            events = []
+        
+        if events:
+            self._log(f"[dim]── 진행 기록 ({len(events)}건) ──────────────────────[/]")
+            for ev in events:
+                name = ev.get("event")
+                if name in ("tool.started", "tool.completed", "tool.failed",
+                            "assistant.delta", "assistant.completed", "reasoning"):
+                    self._render_run_event(name, ev, record=False)
+            self._clear_stream()
+            self._open_tools = []
+        
+        # 결과 표시
+        result = detail.get("result") or ""
+        error = detail.get("error") or ""
+        if result:
+            self._log(f"[dim]── 결과 ──────────────────────────────────[/]")
+            self._log(result)
+        if error:
+            self._log(f"[{_ERR}]── 오류 ──────────────────────────────────[/]")
+            self._log(f"[{_ERR}]{error}[/]")
+        
+        verify = detail.get("verify_report")
+        if verify and isinstance(verify, dict):
+            self._render_verify_report(verify)
+        
+        self._log(f"[dim]— Esc 로 복귀[/]")
 
     def _render_verify_report(self, rep) -> None:
         """검증 증거 패널(§21)을 채팅에 출력 — 마크업 생성은 verify_report_lines 공용."""
@@ -526,7 +622,13 @@ class QueueMixin:
     # ---- 2s 폴링 파이프라인(§36 Q1/Q2/Q5) ----
     async def refresh_queue(self) -> None:
         try:
-            tasks = (await self.http.get("/queue")).json().get("tasks", [])
+            res = (await self.http.get("/queue")).json()
+            tasks = res.get("tasks", [])
+            self.slots = res.get("slots", 1)
+            self.slots_config = res.get("slots_config", "1")
+            self.slots_max = res.get("slots_max", 4)
+            self.active_slots = res.get("active_slots", 0)
+            self.budgets = res.get("budgets", {})
         except Exception:
             self._status("서비스 연결 대기 중…")
             return
@@ -542,7 +644,7 @@ class QueueMixin:
         self._notify_transitions(tasks, cards_before)  # Q5 토스트/벨/채팅 알림
         deck = self.screen if isinstance(self.screen, QueueDeck) else None
         if deck is not None:
-            deck.set_tasks(tasks)                     # 덱이 떠 있으면 리스트도 라이브
+            deck.set_tasks(tasks, slots=self.slots, active_slots=self.active_slots)
 
     def _update_task_cards(self, tasks: list[dict]) -> None:
         by_id = {t["id"]: t for t in tasks}

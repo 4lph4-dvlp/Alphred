@@ -89,3 +89,37 @@ def revert(cfg: Config) -> bool:
         shutil.copy2(backup, model_config_path(cfg.hermes_home))
         return True
     return False
+
+
+# ---- §29.3 확장: 임의 스칼라 get/set — Hermes 상세 설정 전체 표면 커버 ----
+# KNOBS(권장 4종) 밖의 설정(agent.max_turns, auxiliary.*.model, tool_output.* 등)도
+# Alphred 에서 직접 조회·조정할 수 있게 한다. 편집 규칙은 KNOBS 와 동일:
+# 백업 우선·멱등 라인편집·코어 무수정·--revert 로 원복.
+
+def get_scalar(cfg: Config, path: str) -> str | None:
+    """config.yaml 임의 스칼라 조회 — path 는 "agent.max_turns" 점 표기."""
+    keys = [k for k in (path or "").split(".") if k]
+    return read_config_scalar(cfg.hermes_home, keys) if keys else None
+
+
+def set_scalar(cfg: Config, path: str, value) -> dict:
+    """config.yaml 임의 스칼라 설정(백업 우선, 멱등) → {ok, changed, current, error?}.
+
+    키 부재 시 실패 — 신규 키 삽입은 지원하지 않는다(오타가 무의미한 키로 조용히
+    저장되는 것을 방지. Hermes 가 기본 config 에 쓰는 키만 대상).
+    """
+    keys = [k for k in (path or "").split(".") if k]
+    if not keys:
+        return {"ok": False, "changed": False, "error": "빈 경로"}
+    cur = read_config_scalar(cfg.hermes_home, keys)
+    if cur is None:
+        return {"ok": False, "changed": False,
+                "error": f"config.yaml 에 '{path}' 스칼라 키가 없습니다(신규 삽입 미지원)"}
+    if str(cur) == str(value):
+        return {"ok": True, "changed": False, "current": cur}
+    backup = _backup_path(cfg)
+    if not backup.exists():
+        shutil.copy2(model_config_path(cfg.hermes_home), backup)
+    ok = set_config_scalar(cfg.hermes_home, keys, value)
+    return {"ok": ok, "changed": ok, "current": str(value) if ok else cur,
+            "backup": str(backup)}

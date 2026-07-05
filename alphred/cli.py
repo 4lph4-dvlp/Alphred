@@ -18,7 +18,7 @@ from .runtime import build_manager, resolve_task_id
 # 주의: `gateway` 는 가로채지 않고 Hermes 로 위임해 1:1 매핑 유지(QA-1.3).
 #       Alphred 자체 HTTP 게이트웨이는 `alphred serve` 로 띄운다.
 _INTERCEPT = {"queue", "serve", "setup", "tui", "doctor", "prompt", "tune",
-              "keys", "connect", "service"}
+              "keys", "connect", "service", "model"}
 
 
 def _delegate_to_hermes(argv: list[str]) -> int:
@@ -67,6 +67,9 @@ def _cmd_queue(argv: list[str]) -> int:
     sub.add_parser("sync", help="QUEUE.MD 재생성")
     sf = sub.add_parser("safety", help="안전망 상태/리셋(#30719)"); sf.add_argument("--reset", action="store_true")
     sub.add_parser("cron-tick", help="만료된 cron 작업을 큐로 편입(1회)")
+    su = sub.add_parser("scout-update", help="§39 Scout 작업을 수행하여 모델 카탈로그를 갱신")
+    su.add_argument("--verbose", "-v", action="store_true", help="카나리아 테스트 상세 출력")
+    su.add_argument("--free", action="store_true", help="무료 모델(free)만 카탈로그에 채택")
 
     args = p.parse_args(argv)
     cfg = Config.load()
@@ -132,6 +135,20 @@ def _cmd_queue(argv: list[str]) -> int:
             _run_loop(mgr, args.interval)
         elif args.action == "sync":
             mgr.sync_md(); print(f"QUEUE.MD 갱신: {cfg.queue_md_path}")
+        elif args.action == "scout-update":
+            from .scout import run_scout_update
+            import os
+            or_key = os.environ.get("OPENROUTER_API_KEY")
+            nim_key = os.environ.get("NVIDIA_API_KEY")
+            success = run_scout_update(cfg.alphred_home, openrouter_key=or_key, nim_key=nim_key, verbose=args.verbose, free_only=args.free)
+            if success:
+                from .config import sync_model_routes
+                sync_model_routes(cfg.alphred_home, cfg.hermes_home)
+                print("Scout 업데이트 및 model_routes 동기화 완료")
+            else:
+                print("Scout 업데이트 실패")
+                return 1
+            return 0
         elif args.action == "cron-tick":
             from .cron_intercept import CronIntercept
             cron = CronIntercept(mgr, cfg.cron_jobs_path, cfg.cron_state_path)
@@ -210,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_connect(argv[1:])
         if argv[0] == "service":
             return _cmd_service(argv[1:])
+        if argv[0] == "model":
+            return _cmd_model(argv[1:])
     # `alphred chat` 은 제거됨 — 순정 Hermes TUI 는 `hermes` 로 직접 실행한다.
     # (Hermes 에 chat 서브커맨드가 없어 'chat' 토큰을 그대로 넘기면 오해석되므로 명시 안내.)
     if argv and argv[0] == "chat":
@@ -375,10 +394,15 @@ def _cmd_tune(argv: list[str]) -> int:
 
     p = argparse.ArgumentParser(
         prog="alphred tune",
-        description="Hermes config 품질 감사(기본=읽기전용). --apply 로 동의 적용, --revert 로 원복.")
+        description="Hermes config 품질 감사(기본=읽기전용). --apply 로 동의 적용, --revert 로 원복. "
+                    "--get/--set 으로 임의 스칼라(agent.max_turns 등) 조회·조정.")
     p.add_argument("--apply", nargs="*", metavar="ID", default=None,
                    help="권장 설정 적용(인자 없으면 적용 가능한 전부, 또는 knob id 나열). 백업 생성.")
     p.add_argument("--revert", action="store_true", help="tune 백업으로 config.yaml 원복")
+    p.add_argument("--get", metavar="PATH",
+                   help="config.yaml 스칼라 조회 (점 표기, 예: agent.max_turns)")
+    p.add_argument("--set", nargs=2, metavar=("PATH", "VALUE"),
+                   help="config.yaml 스칼라 설정(백업 후, 예: --set agent.max_turns 200)")
     p.add_argument("--json", action="store_true", help="감사 결과를 JSON 으로 출력")
     args = p.parse_args(argv)
     cfg = Config.load()
@@ -387,6 +411,27 @@ def _cmd_tune(argv: list[str]) -> int:
         ok = _tune.revert(cfg)
         print("원복 완료(config.yaml 백업 복원)." if ok else "원복할 tune 백업이 없습니다.")
         return 0 if ok else 1
+
+    if args.get:
+        val = _tune.get_scalar(cfg, args.get)
+        if val is None:
+            print(f"(없음) {args.get} — config.yaml 에 해당 스칼라 키가 없습니다.")
+            return 1
+        print(val)
+        return 0
+
+    if args.set:
+        path, value = args.set
+        res = _tune.set_scalar(cfg, path, value)
+        if not res["ok"]:
+            print(f"실패: {res.get('error')}")
+            return 1
+        if res["changed"]:
+            print(f"{path} = {value}  (백업: {res['backup']})")
+            print("데몬 재기동 후 반영됩니다(Hermes 게이트웨이가 config 를 다시 읽음).")
+        else:
+            print(f"{path} = {value} (변경 없음)")
+        return 0
 
     if args.apply is not None:
         ids = args.apply or None
@@ -427,6 +472,7 @@ def _cmd_tune(argv: list[str]) -> int:
     print("\n  적용: alphred tune --apply" + (f"   (대상: {', '.join(actionable)})" if actionable
                                             else "   (적용할 변경 없음)"))
     print("  원복: alphred tune --revert")
+    print("  임의 설정: alphred tune --get <path> · --set <path> <value>  (예: agent.max_turns)")
     return 0
 
 
@@ -536,6 +582,22 @@ def _collect_doctor(cfg: Config, deep: bool = False) -> dict:
         add("모델/provider", bool(mc.get("default")), f"{model}  (provider={provider})")
     except Exception as e:
         add("모델/provider", False, f"config 읽기 실패: {e}")
+    # 4c) Hermes 동시 run 수 점검 (F1, §38.2 G)
+    try:
+        from .config import read_config_scalar
+        val = read_config_scalar(cfg.hermes_home, ["gateway", "api_server", "max_concurrent_runs"])
+        max_concurrent = int(val) if val is not None else 10
+        try:
+            slots_limit = int(cfg.slots)
+        except (ValueError, TypeError):
+            slots_limit = cfg.slots_max
+
+        ok = max_concurrent >= slots_limit + 2
+        add("Hermes 동시성 설정(F1)", ok,
+            f"gateway.api_server.max_concurrent_runs={max_concurrent} "
+            f"vs slots_limit={slots_limit} (권장: max_concurrent >= slots_limit + 2)")
+    except Exception as e:
+        add("Hermes 동시성 설정(F1)", True, f"점검 실패: {e}")
     # 4b) depth별 모델 라우팅(§29.1) — 설정 시에만 의미
     try:
         tiers = cfg.get_tiers()
@@ -957,6 +1019,59 @@ def _cmd_service(argv: list[str]) -> int:
               "launchctl load ~/Library/LaunchAgents/com.alphred.serve.plist")
     else:
         print("해제: launchctl unload ~/Library/LaunchAgents/com.alphred.serve.plist")
+    return 0
+
+
+def _cmd_model(argv: list[str]) -> int:
+    """사용 가능한 모델 목록 조회 서브커맨드."""
+    cfg = Config.load()
+    try:
+        d = cfg.fetch_available_models()
+    except Exception as e:
+        sys.stderr.write(f"Error fetching models: {e}\n")
+        return 1
+        
+    from rich.console import Console
+    from rich.table import Table
+    from rich import box
+    
+    console = Console()
+    
+    cur = d.get("current") or "(config 기본값)"
+    badge = " 💭 추론" if d.get("current_reasoning") else ""
+    console.print(f"[bold yellow]현재 모델[/]: {cur}{badge}")
+    
+    if cfg.has_model_tiers():
+        tiers = cfg.get_tiers()
+        def _lbl(t):
+            v = tiers.get(t)
+            if isinstance(v, dict):
+                r = f" 💭{v.get('reasoning')}" if v.get("reasoning") else ""
+                return f"{v.get('model') or 'base'}{r}({v.get('source', '')})"
+            return "base"
+        console.print(f"[bold yellow]깊이별 모델[/]: high={_lbl('high')} · mid={_lbl('mid')} · low={_lbl('low')} · base={tiers.get('base') or '?'}")
+    else:
+        console.print("[dim]깊이별 모델: 미설정(단일 모델).[/]")
+        
+    models = d.get("models") or []
+    if models:
+        table = Table(box=box.ROUNDED, show_header=True, title="사용 가능한 모델 목록", title_style="bold yellow")
+        table.add_column("Provider", style="cyan", no_wrap=True)
+        table.add_column("Model", style="green")
+        table.add_column("Category", style="magenta")
+        
+        for m in models:
+            prov = m.get("provider_label") or m.get("provider") or ""
+            m_id = m.get("id") or ""
+            m_display = f"{m_id} 💭" if m.get("reasoning") else m_id
+            cats = ", ".join(m.get("categories") or [])
+            table.add_row(prov, m_display, cats)
+            
+        console.print(table)
+        console.print("[dim]💭=추론(사고 과정 표시 가능)[/]")
+    else:
+        console.print("[dim]사용 가능한 모델 목록을 가져오지 못했습니다. provider 설정이나 인증을 확인하세요.[/]")
+        
     return 0
 
 

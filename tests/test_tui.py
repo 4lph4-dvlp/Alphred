@@ -990,3 +990,42 @@ def test_tui_slash_palette_filters_and_navigates():
         await app.http.aclose()
 
     asyncio.run(go())
+
+
+def test_tui_budget_and_slots():
+    """§38 P4: TUI 상태줄에 남은 RPD 예산이 노출되고 큐 덱에서 멀티 실행 슬롯 현황이 시각화되는지 테스트."""
+    from textual.widgets import Static
+    from alphred.tui_queue import deck_slot_line
+
+    async def go():
+        app = AlphredTUI("http://localhost:59999", None)
+        async with app.run_test(size=(100, 20)) as pilot:
+            await pilot.pause()
+            
+            # 1) 상태줄 예산 표시 확인
+            app.budgets = {
+                "openrouter": {"limit": 50, "used": 5, "remaining": 45},
+                "nvidia": {"limit": 100, "used": 10, "remaining": 90}
+            }
+            app._refresh_statusbar()
+            bar = str(app.query_one("#statusbar", Static).content)
+            assert "budget:" in bar
+            assert "OR:45" in bar
+            assert "NV:90" in bar
+
+            # 2) 큐 덱 멀티 슬롯 라인 시각화 테스트
+            tasks = [
+                {"id": "t1", "prompt": "task 1", "state": "In-Progress"},
+                {"id": "t2", "prompt": "task 2", "state": "In-Progress"},
+                {"id": "t3", "prompt": "task 3", "state": "Pending", "priority": 5}
+            ]
+            line = deck_slot_line(tasks, slots=4, active_slots=2)
+            assert "실행 슬롯 (2/4)" in line
+            assert "[t1]" in line
+            assert "[t2]" in line
+            assert "대기 1순위" in line
+            assert "t3" in line
+
+        await app.http.aclose()
+
+    asyncio.run(go())

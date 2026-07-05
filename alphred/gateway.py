@@ -30,7 +30,7 @@ from .config import Config
 from .hermes_client import HermesClient
 from .prompt import load_light_harness
 from .queue_manager import QueueManager
-from .runtime import build_manager
+from .runtime import build_manager, restore_base_model
 from .safety import RestartGuard
 from .server import routes_admin, routes_models, routes_openai, routes_queue
 from .server.deps import GatewayDeps
@@ -92,6 +92,7 @@ def create_app(cfg: Config | None = None, *, mgr: QueueManager | None = None,
             yield
         finally:
             scheduler.stop()
+            restore_base_model(cfg)   # §29.1 tier 값이 config.yaml 에 잔류하지 않도록
             client.close()
             store.close()
 

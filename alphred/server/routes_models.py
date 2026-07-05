@@ -6,7 +6,8 @@ import os
 import subprocess
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..config import read_model_config
+from ..config import (REASONING_LEVELS, _norm_spec, read_model_config,
+                      read_models_file, read_reasoning_effort, set_reasoning_effort)
 from .deps import GatewayDeps, make_auth
 
 
@@ -84,49 +85,85 @@ def build_router(deps: GatewayDeps) -> APIRouter:
 
     @router.get("/models/available")
     def models_available():
-        """선택 가능한 실제 모델 목록 — Hermes 의 curated 모델 레지스트리(provider별)를 조회.
+        """선택 가능한 실제 모델 목록 — 모든 인증된 provider + 현재 기본 provider 의 curated 모델들을 조회 및 머지."""
+        res = cfg.fetch_available_models()
+        res["has_tiers"] = cfg.has_model_tiers()
+        res["tiers"] = cfg.get_tiers() if res["has_tiers"] else {}
+        
+        # 하위 호환 레이어 구성
+        current_prov_label = ""
+        reasoning_ids = []
+        for m in res["models"]:
+            if m["provider"] == res["current_provider"]:
+                current_prov_label = m["provider_label"]
+            if m["reasoning"]:
+                reasoning_ids.append(m["id"])
+                
+        res["provider"] = current_prov_label or res["current_provider"]
+        res["reasoning"] = reasoning_ids
+        return res
 
-        :8642 의 /v1/models 는 메타모델(hermes-agent)만 주므로, config 의 현재 모델에서
-        provider 를 추론해 Hermes venv 의 hermes_cli.models 로 큐레이션 목록을 가져온다.
-        """
-        model_cfg = read_model_config(cfg.hermes_home)
-        cur = model_cfg.get("default")
-        # 실제 provider 는 model.provider 가 우선(예: default=google/gemma-... 인데 provider=nvidia).
-        provider = model_cfg.get("provider") or (
-            cur.split("/")[0] if cur and "/" in cur else None)
-        info = _curated_models(cfg, provider)
-        models = info.get("models", [])
-        rset = _reasoning_model_ids(cfg.hermes_home, provider)   # §33 provider 스코프 정확매칭
-        reasoning = [m for m in models if _is_reasoning(m, rset)]
-        return {"current": cur, "provider": info.get("label") or provider,
-                "models": models, "reasoning": reasoning,
-                "current_reasoning": _is_reasoning(cur or "", rset)}
 
     @router.get("/models/tiers")
     def models_tiers():
-        """depth별 모델 매핑 조회(§29.1) — high/mid/low → 모델 + base."""
-        return {"tiers": cfg.get_tiers(), "enabled": cfg.has_model_tiers()}
+        """depth별 모델·추론 매핑 조회(§29.1) — high/mid/low → {model?, reasoning?} + base."""
+        return {"tiers": cfg.get_tiers(),
+                "enabled": cfg.has_model_tiers() or cfg.has_reasoning_tiers(),
+                "reasoning_effort": read_reasoning_effort(cfg.hermes_home) or ""}
 
     @router.post("/models/tiers")
     def set_models_tier(body: dict):
-        """depth tier 모델 설정/해제(§29.1). body={tier:high|mid|low, model:<name>|null,
-        provider?, base_url?}. model=null/"" → 해제(base 사용)."""
+        """depth tier 모델·추론 설정/해제(§29.1). body={tier:high|mid|low, model?, reasoning?,
+        provider?, base_url?}.
+
+        부분 갱신: 본문에 있는 필드만 바꾼다 — "model" 키가 있으면 모델부(provider/base_url
+        포함)를 교체(null/"" → 모델 해제), "reasoning" 키가 있으면 추론 깊이만 교체(null/"" →
+        해제). 남는 필드가 없으면 tier 전체가 해제되어 base 를 쓴다.
+        """
         tier = str(body.get("tier") or "").strip().lower()
         if tier not in ("high", "mid", "low"):
             raise HTTPException(status_code=400, detail="tier must be high|mid|low")
-        name = body.get("model")
-        spec = None
-        if name:
-            spec = {"model": str(name)}
-            if body.get("provider"):
-                spec["provider"] = str(body["provider"])
-            if body.get("base_url"):
-                spec["base_url"] = str(body["base_url"])
+        spec = dict(_norm_spec(read_models_file(cfg.alphred_home).get(tier)) or {})
+        if "model" in body:
+            spec.pop("model", None)
+            spec.pop("provider", None)
+            spec.pop("base_url", None)
+            if body.get("model"):
+                spec["model"] = str(body["model"])
+                if body.get("provider"):
+                    spec["provider"] = str(body["provider"])
+                if body.get("base_url"):
+                    spec["base_url"] = str(body["base_url"])
+        if "reasoning" in body:
+            spec.pop("reasoning", None)
+            if body.get("reasoning"):
+                spec["reasoning"] = str(body["reasoning"])
         try:
-            cfg.set_tier_model(tier, spec)
+            cfg.set_tier_model(tier, spec or None)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        return {"tiers": cfg.get_tiers(), "enabled": cfg.has_model_tiers()}
+        return {"tiers": cfg.get_tiers(),
+                "enabled": cfg.has_model_tiers() or cfg.has_reasoning_tiers(),
+                "reasoning_effort": read_reasoning_effort(cfg.hermes_home) or ""}
+
+    @router.post("/models/reasoning")
+    def set_reasoning(body: dict):
+        """전역 추론 깊이(agent.reasoning_effort) 설정 — Hermes config.yaml 라인편집.
+
+        body={value: none|minimal|low|medium|high|xhigh|""} — "" = Hermes 기본(medium).
+        depth tier 복원 기준(base_reasoning)도 함께 갱신해 라우팅이 옛값으로 되돌리지 않는다.
+        """
+        val = str(body.get("value") or "").strip().lower()
+        if val and val not in REASONING_LEVELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"value must be one of {'|'.join(REASONING_LEVELS)} or ''")
+        set_reasoning_effort(cfg.hermes_home, val)
+        data = read_models_file(cfg.alphred_home)
+        if "base_reasoning" in data:
+            data["base_reasoning"] = val
+            cfg._write_models_file(data)
+        return {"reasoning_effort": val}
 
     @router.post("/models/default")
     def set_default_model(body: dict):

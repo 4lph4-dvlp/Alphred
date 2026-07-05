@@ -199,24 +199,29 @@ INTENT_INSTRUCTION = (
     '- "priority": 1-10 (10 = urgent immediate reply, 1 = low background).\n'
     '- "depth": "low" (trivial), "mid" (normal background work), "high" (multi-step, '
     "high-stakes, or artifact-producing work that needs verification).\n"
+    '- "category": one of coding|research|analysis|writing|translation|creative|math|agentic|general.\n'
     '- "missing_info": up to 3 things worth asking the user, each '
     '{"what":"...","critical":true|false}. critical=true ONLY if a wrong guess would '
     "make the result useless. Usually an empty list.\n"
+    '- "refers_to_previous": true ONLY if the request depends on earlier work/results '
+    'in this conversation to be understood (e.g. "do the same for X", "that one too", '
+    '"같은 방식으로", "이번에는 ..."); false for self-contained requests.\n'
     '- "confidence": 0-100 that this routing is right.\n'
     "Respond with ONLY the compact JSON object.\n\n"
     "Examples:\n"
     "REQUEST: 미국 주식 시장 요약해서 PDF로 만들어줘\n"
     '{"goal":"미국 주식 시장 요약 PDF 보고서 생성","domain":"document",'
     '"deliverable":{"type":"file","format":"pdf"},"kind":"heavy","priority":5,'
-    '"depth":"high","missing_info":[{"what":"보고서 분량/대상 독자","critical":false}],'
+    '"depth":"high","category":"research","missing_info":[{"what":"보고서 분량/대상 독자","critical":false}],'
     '"confidence":88}\n'
     "REQUEST: what's 2+2?\n"
     '{"goal":"simple arithmetic answer","domain":"chat",'
     '"deliverable":{"type":"answer","format":null},"kind":"light","priority":9,'
-    '"depth":"low","missing_info":[],"confidence":99}\n\n'
+    '"depth":"low","category":"math","missing_info":[],"confidence":99}\n\n'
     "REQUEST:\n"
 )
 
+_INTENT_CATEGORIES = {"coding", "research", "analysis", "writing", "translation", "creative", "math", "agentic", "general"}
 _INTENT_DOMAINS = {"coding", "research", "document", "data", "admin", "chat", "other"}
 _INTENT_DEPTHS = {"low", "mid", "high"}
 
@@ -278,6 +283,11 @@ def parse_intent(text: str) -> dict | None:
         conf = max(0, min(100, int(d.get("confidence"))))
     except (TypeError, ValueError):
         conf = 50
+
+    category = str(d.get("category", "")).lower()
+    if category not in _INTENT_CATEGORIES:
+        category = "general"
+
     return {
         "goal": str(d.get("goal") or "")[:200],
         "domain": domain if domain in _INTENT_DOMAINS else "other",
@@ -285,8 +295,32 @@ def parse_intent(text: str) -> dict | None:
                         "format": (str(deliv.get("format"))[:12].lower()
                                    if deliv.get("format") else None)},
         "kind": kind, "priority": prio, "depth": depth,
+        "category": category,
         "missing_info": missing, "confidence": conf,
+        "refers_to_previous": bool(d.get("refers_to_previous")),  # §40 지시어 해소 트리거
     }
+
+
+def heuristic_category(prompt: str) -> str:
+    """IntentCard 가 없거나 실패했을 때 프롬프트 텍스트에서 휴리스틱하게 카테고리를 추정한다."""
+    p = (prompt or "").lower()
+    if any(kw in p for kw in ("python", "code", "def ", "class ", "git", "테스트", "test", "함수", "버그", "에러", "script", "스크립트", "코드")):
+        return "coding"
+    if any(kw in p for kw in ("수학", "계산", "더하기", "빼기", "곱하기", "나누기", "방정식", "통계", "math", "calculator", "statistics", "1+1")):
+        return "math"
+    if any(kw in p for kw in ("번역", "translate", "영어", "한글", "국어", "일어", "중어", "spanish", "japanese")):
+        return "translation"
+    if any(kw in p for kw in ("자동화", "매크로", "cron", "스케줄", "install", "설치", "시스템")):
+        return "agentic"
+    if any(kw in p for kw in ("보고서", "문서", "글쓰기", "이메일", "장문", "편지", "draft", "report", "doc")):
+        return "writing"
+    if any(kw in p for kw in ("디자인", "그림", "소설", "시", "창작", "카피라이팅", "creative", "design", "paint", "draw")):
+        return "creative"
+    if any(kw in p for kw in ("조사", "검색", "찾아", "리서치", "news", "뉴스", "search", "구글링", "crawling", "크롤링")):
+        return "research"
+    if any(kw in p for kw in ("분석", "도표", "차트", "통계", "excel", "csv", "xlsx", "데이터", "data", "summary", "요약")):
+        return "analysis"
+    return "general"
 
 
 def intent_to_classification(card: dict, *, source: str = TaskSource.API.value
@@ -298,6 +332,50 @@ def intent_to_classification(card: dict, *, source: str = TaskSource.API.value
         prio = max(prio, 9)
     reason = f"intent({card.get('confidence', '?')}): {card.get('goal') or kind}"[:160]
     return kind, _clamp(prio), reason
+
+
+# ---- §40 지시어 해소(reference resolution) — 후속 요청을 자기완결형으로 재작성 ----
+# 대화형 검색/RAG 의 표준인 query rewriting: "이번에는 육식맨도 동일하게" 를 원장(이전
+# 작업 요약)에 접지해 "육식맨 채널 최신 영상을 분석해 …요약 PDF 생성" 으로 풀어쓴다.
+# 재작성본은 계획·실행·검증(§21 DoD)의 기준이 되므로, 새 요구를 지어내면 안 된다.
+REWRITE_INSTRUCTION = (
+    "The user's new REQUEST refers to earlier work in this session (listed under RECENT "
+    "SESSION WORK). Rewrite the REQUEST as ONE self-contained task statement that needs "
+    "no conversation context.\n"
+    "Rules:\n"
+    "- Keep the user's language and exact intent. Do NOT invent new requirements.\n"
+    "- Resolve every reference (\"the same\", \"that one\", \"동일하게\") into concrete "
+    "details taken from the referenced earlier task: deliverable type/format, scope, "
+    "style, structure.\n"
+    "- If an earlier artifact is a natural template (e.g. \"same report format\"), "
+    "mention its path so the worker can mirror it.\n"
+    "- If the REQUEST is actually self-contained, return it unchanged with low "
+    "confidence.\n"
+    'Respond with ONLY compact JSON: {"resolved":"...","confidence":0-100}\n\n'
+)
+
+# 재작성 채택 임계 — 이보다 낮으면 원문 유지(원장 블록 주입만으로 진행).
+REWRITE_MIN_CONFIDENCE = 60
+
+
+def build_rewrite_prompt(prompt: str, ledger: str) -> str:
+    return (REWRITE_INSTRUCTION + (ledger or "")[:1600]
+            + "\n\nREQUEST:\n" + (prompt or "")[:2000])
+
+
+def parse_rewrite(text: str) -> dict | None:
+    """LLM 응답 → {"resolved", "confidence"}. 형식 불량/빈 재작성이면 None(원문 유지)."""
+    d = parse_json_object(text)
+    if d is None:
+        return None
+    resolved = str(d.get("resolved") or "").strip()
+    if not resolved:
+        return None
+    try:
+        conf = max(0, min(100, int(d.get("confidence"))))
+    except (TypeError, ValueError):
+        conf = 50
+    return {"resolved": resolved[:4000], "confidence": conf}
 
 
 # ---- §34.4 인테이크 질문 생성 (Clarify) — 추천 답변 포함 ----
@@ -523,10 +601,13 @@ _V2_CHECKS = {"file", "content", "exit_code", "none"}
 def build_planner_v2_prompt(prompt: str, *, capabilities: str | None = None,
                             intent: dict | None = None, intake: str | None = None,
                             draft: dict | None = None,
-                            replan: str | None = None) -> str:
+                            replan: str | None = None,
+                            context: str | None = None) -> str:
     parts = [PLANNER_V2_INSTRUCTION]
     if capabilities:
         parts.append("CAPABILITY INVENTORY:\n" + capabilities[:1600] + "\n")
+    if context:                               # §40 세션 원장 — "동일 형식" 등 참조 접지
+        parts.append(context[:1400] + "\n")
     goal = (intent or {}).get("goal")
     if goal:
         parts.append(f"USER GOAL (pre-analyzed): {goal}\n")

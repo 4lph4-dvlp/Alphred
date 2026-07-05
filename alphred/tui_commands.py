@@ -106,6 +106,7 @@ class CommandsMixin:
 
     # ---- 인자 2차 완성(§36 I4) — 동기 캐시만 사용(모델 목록·세션·큐 행) ----
     _DEPTHS = ("auto", "low", "mid", "high")
+    _REASONING_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh")
     _QUEUE_SUBS = ("list", "ask", "cancel", "purge", "clear", "pause", "resume",
                    "retry", "prio")
     _QUEUE_ID_SUBS = ("cancel", "purge", "pause", "resume", "retry", "prio")
@@ -115,9 +116,34 @@ class CommandsMixin:
         out: list[tuple[str, str]] = []
         if cmd == "depth":
             out = [(d, f"/depth {d}") for d in self._DEPTHS if d.startswith(arg.lower())]
+        elif cmd == "slot":
+            parts = arg.split()
+            if not parts or (len(parts) == 1 and not arg.endswith(" ")):
+                q = parts[0] if parts else ""
+                cands = ["auto", "max", "1", "2", "3", "4"]
+                out = [(s, f"/slot {s}") for s in cands if s.startswith(q.lower())]
+            elif parts[0].lower() == "max":
+                q = parts[1] if len(parts) > 1 else ""
+                cands = ["2", "4", "6", "8"]
+                out = [(f"max {s}", f"/slot max {s}") for s in cands if s.startswith(q.lower())]
         elif cmd == "model":
             names = [m for m in self._model_names if not arg or fuzzy_match(arg, m)]
             out = [(m, f"/model {m}") for m in names]
+        elif cmd == "reasoning":
+            parts = arg.split()
+            levels = list(self._REASONING_LEVELS) + ["auto"]
+            if not parts or (len(parts) == 1 and not arg.endswith(" ")):
+                q = parts[0] if parts else ""
+                seen = set()
+                cands = []
+                for s in list(self._TIERS) + levels:
+                    if s not in seen:
+                        seen.add(s)
+                        cands.append(s)
+                out = [(s, f"/reasoning {s}") for s in cands if s.startswith(q)]
+            elif parts[0] in self._TIERS:
+                q = parts[1] if len(parts) > 1 else ""
+                out = [(s, f"/reasoning {parts[0]} {s}") for s in levels if s.startswith(q)]
         elif cmd == "sessions" and self._sessions:
             for i, s in enumerate(self._sessions.list()[:12], 1):
                 label = f"{i}. {_short_sid(s.get('id', ''))}  {s.get('title') or '(제목 없음)'}"
@@ -363,6 +389,78 @@ class CommandsMixin:
             return
         self._log("[red]사용법: /depth low|mid|high  또는  /depth auto[/]")
 
+    async def cmd_slot(self, args: str) -> None:
+        """§38 동시 실행 슬롯 설정/보기."""
+        args = args.strip()
+        if not args:
+            try:
+                res = (await self.http.get("/queue")).json()
+            except Exception as e:
+                self._log(f"[{_ERR}]슬롯 조회 실패: {e}[/]")
+                return
+            slots = res.get("slots", 1)
+            active = res.get("active_slots", 0)
+            tasks = res.get("tasks", [])
+            pending = sum(1 for t in tasks if t.get("state") in ("Pending", "Paused"))
+            running = sum(1 for t in tasks if t.get("state") == "In-Progress")
+            slots_cfg = res.get("slots_config", "1")
+            slots_max = res.get("slots_max", 4)
+            is_auto = str(slots_cfg).lower() == "auto"
+            mode = f"auto (상한 {slots_max})" if is_auto else str(slots_cfg)
+            bar_filled = min(running, slots)
+            bar_empty = max(0, slots - running)
+            bar = "█" * bar_filled + "░" * bar_empty
+            self._log(f"[b {_ACCENT}]◆ 동시 실행 슬롯[/]")
+            self._log(f"  모드     {mode}")
+            self._log(f"  현재     {bar}  {running}/{slots} 실행 중 · {pending} 대기")
+            self._log(f"  [dim]사용법: /slot <숫자|auto> · /slot max <숫자>[/]")
+            return
+
+        parts = args.split()
+        body = {}
+
+        if parts[0].lower() == "max":
+            if len(parts) < 2 or not parts[1].isdigit():
+                self._log(f"[{_ERR}]사용법: /slot max <숫자>[/]")
+                return
+            body["slots_max"] = int(parts[1])
+        elif parts[0].lower() == "auto":
+            body["slots"] = "auto"
+        elif parts[0].isdigit():
+            val = int(parts[0])
+            if val < 1:
+                self._log(f"[{_ERR}]슬롯 수는 1 이상이어야 합니다.[/]")
+                return
+            body["slots"] = val
+        else:
+            self._log(f"[{_ERR}]사용법: /slot [<숫자>|auto|max <숫자>][/]")
+            return
+
+        try:
+            res = (await self.http.patch("/queue/slots", json=body)).json()
+        except Exception as e:
+            self._log(f"[{_ERR}]슬롯 설정 실패: {e}[/]")
+            return
+
+        new_slots = res.get("slots", "?")
+        new_max = res.get("slots_max", 4)
+        active = res.get("active", 0)
+        current = res.get("current", 0)
+
+        if "slots" in body:
+            if str(body["slots"]).lower() == "auto":
+                self._log(f"[{_OK}]동시 실행 슬롯: auto (상한 {new_max})[/]")
+                self._log(f"[dim]Provider 예산과 대기 작업 수에 따라 자동으로 슬롯이 조절됩니다.[/]")
+            else:
+                self._log(f"[{_OK}]동시 실행 슬롯: {new_slots}[/]")
+                free = max(0, current - active)
+                if free > 0:
+                    self._log(f"[dim]빈 슬롯 {free}개에 대기 작업이 즉시 배정됩니다.[/]")
+        if "slots_max" in body:
+            self._log(f"[{_OK}]auto 상한: {new_max}[/]")
+
+        await self.refresh_queue()
+
     @staticmethod
     def _resolve_session(items: list[dict], token: str) -> dict | None:
         """세션을 번호(1-base) 또는 ID(단축/전체 prefix)로 찾는다. 큐 작업 ID 해석과 동일 규칙."""
@@ -434,6 +532,9 @@ class CommandsMixin:
             self._new_session()  # 현재 세션을 지웠으면 새 세션 시작
         await self.refresh_queue()
 
+    def cmd_exit(self, args: str) -> None:
+        self.run_worker(self._quit())
+
     def cmd_quit(self, args: str) -> None:
         self.run_worker(self._quit())
 
@@ -452,19 +553,29 @@ class CommandsMixin:
             except Exception as e:
                 self._log(f"[red]모델 목록 조회 실패: {e}[/]")
                 return
-            rset = set(d.get("reasoning") or [])          # §33 추론(사고 표시 가능) 모델
             cur = self.model or d.get("current") or "(config 기본값)"
             badge = " [{}]💭 추론[/]".format(_INFO) if d.get("current_reasoning") else ""
             self._log(f"[b {_AMBER}]현재 모델[/]: {cur}{badge}")
             await self._show_tiers()
+            
             models = d.get("models") or []
             if models:
-                prov = d.get("provider") or ""
-                self._log(f"[dim]{prov} 사용 가능 ({len(models)}개):[/]  [dim]💭=추론(사고 과정 표시 가능)[/]")
-                self._log("  " + ", ".join(
-                    f"[{_ACCENT}]{m}[/]" + (" 💭" if m in rset else "") for m in models[:60]))
-                if len(models) > 60:
-                    self._log(f"  [dim]… 외 {len(models) - 60}개[/]")
+                from rich.table import Table
+                from rich import box
+                table = Table(box=box.ROUNDED, show_header=True)
+                table.add_column("Provider", style="cyan", no_wrap=True)
+                table.add_column("Model", style="green")
+                table.add_column("Category", style="magenta")
+                
+                for m in models:
+                    prov = m.get("provider_label") or m.get("provider") or ""
+                    m_id = m.get("id") or ""
+                    m_display = f"{m_id} 💭" if m.get("reasoning") else m_id
+                    cats = ", ".join(m.get("categories") or [])
+                    table.add_row(prov, m_display, cats)
+                
+                self._chat_add(Static(table))
+                self._log("[dim]💭=추론(사고 과정 표시 가능)[/]")
             else:
                 self._log("[dim]목록을 가져오지 못했습니다(provider 미설정?). /model <이름> 으로 직접 전환하세요.[/]")
             self._log("[dim]전환: /model <이름>  ·  깊이별: /model high|mid|low <이름> (또는 auto 해제)[/]")
@@ -518,7 +629,7 @@ class CommandsMixin:
                       f"/model 로 목록 확인.[/]")
 
     async def _show_tiers(self) -> None:
-        """현재 depth별 모델 매핑을 표시(§29.1)."""
+        """현재 depth별 모델·추론 매핑을 표시(§29.1)."""
         try:
             d = (await self.http.get("/models/tiers")).json()
         except Exception:
@@ -531,10 +642,82 @@ class CommandsMixin:
         def _lbl(t):
             v = tiers.get(t)
             if isinstance(v, dict):
-                return f"{v.get('model')}[dim]({v.get('source', '')})[/]"
+                r = f" 💭{v.get('reasoning')}" if v.get("reasoning") else ""
+                return f"{v.get('model') or '[dim]base[/]'}{r}[dim]({v.get('source', '')})[/]"
             return "[dim]base[/]"
         self._log(f"[b {_AMBER}]깊이별 모델[/]: high={_lbl('high')} · mid={_lbl('mid')} · "
                   f"low={_lbl('low')} · [dim]base={tiers.get('base') or '?'}[/]")
+
+    async def cmd_reasoning(self, args: str) -> None:
+        """추론 깊이(Hermes agent.reasoning_effort) 설정 — 전역 또는 깊이별(§29.1 확장)."""
+        args = args.strip().lower()
+        if not args:
+            try:
+                d = (await self.http.get("/models/tiers")).json()
+            except Exception as e:
+                self._log(f"[red]추론 설정 조회 실패(서비스 준비 중?): {e}[/]")
+                return
+            cur = d.get("reasoning_effort") or "[dim](Hermes 기본=medium)[/]"
+            self._log(f"[b {_AMBER}]추론 깊이[/]: {cur}")
+            tiers = d.get("tiers") or {}
+
+            def _r(t):
+                v = tiers.get(t)
+                return (v.get("reasoning") if isinstance(v, dict) and v.get("reasoning")
+                        else "[dim]base[/]")
+            self._log(f"  깊이별: high={_r('high')} · mid={_r('mid')} · low={_r('low')} · "
+                      f"[dim]base={tiers.get('base_reasoning') or '(기본)'}[/]")
+            self._log(f"[dim]설정: /reasoning <{'|'.join(self._REASONING_LEVELS)}>  ·  "
+                      f"깊이별: /reasoning high xhigh  ·  해제: /reasoning auto[/]")
+            return
+        parts = args.split()
+        if parts[0] in self._TIERS:                       # 깊이별 tier 설정
+            tier = parts[0]
+            val = parts[1] if len(parts) > 1 else ""
+            if not val:
+                self._log(f"[red]사용법: /reasoning {tier} <레벨>  (또는 auto 로 해제)[/]")
+                return
+            unset = val in ("auto", "-", "default")
+            if not unset and val not in self._REASONING_LEVELS:
+                self._log(f"[red]알 수 없는 레벨: {val} — "
+                          f"{'|'.join(self._REASONING_LEVELS)} 또는 auto[/]")
+                return
+            try:
+                r = await self.http.post("/models/tiers",
+                                         json={"tier": tier,
+                                               "reasoning": (None if unset else val)})
+                if r.status_code >= 400:
+                    self._log(f"[red]설정 실패: {r.text[:200]}[/]")
+                    return
+            except Exception as e:
+                self._log(f"[red]설정 실패: {e}[/]")
+                return
+            if unset:
+                self._log(f"[dim]{tier} 작업 추론 깊이 해제 → 기본값 사용[/]")
+            else:
+                self._log(f"[{_OK}]{tier} 작업 추론 깊이 = {val}[/] (다음 해당 작업부터 적용)")
+            await self._show_tiers()
+            return
+        val = parts[0]                                    # 전역 설정
+        if val in ("auto", "-", "default"):
+            val = ""
+        elif val not in self._REASONING_LEVELS:
+            self._log(f"[red]알 수 없는 레벨: {val} — "
+                      f"{'|'.join(self._REASONING_LEVELS)} 또는 auto(기본 복원)[/]")
+            return
+        try:
+            r = await self.http.post("/models/reasoning", json={"value": val})
+            if r.status_code >= 400:
+                self._log(f"[red]설정 실패: {r.text[:200]}[/]")
+                return
+        except Exception as e:
+            self._log(f"[red]설정 실패(서비스 준비 중?): {e}[/]")
+            return
+        if val:
+            self._log(f"[{_OK}]추론 깊이를 {val} 로 설정했습니다[/] "
+                      f"[dim](모든 작업 · Hermes config.yaml 반영)[/]")
+        else:
+            self._log(f"[{_OK}]추론 깊이를 Hermes 기본(medium)으로 복원했습니다[/]")
 
     async def cmd_plan(self, args: str) -> None:
         """드라이런(§21 V3) — 실행 전 심화도/계획/비용 견적 미리보기."""

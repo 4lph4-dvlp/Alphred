@@ -7,6 +7,30 @@ Alphred 의 눈에 띄는 변경 사항. 형식은 [Keep a Changelog](https://ke
 
 ### 추가 (Added)
 
+- **§29.1 확장 — 추론 깊이(reasoning_effort) 래핑**: Hermes `agent.reasoning_effort`
+  (none/minimal/low/medium/high/xhigh)를 Alphred 에서 설정 가능 — 전역
+  (`POST /models/reasoning`, TUI `/reasoning <레벨>`) + depth tier별
+  (`/reasoning high xhigh`, env `ALPHRED_REASONING_HIGH|MID|LOW`, models.json
+  `{tier: {reasoning}}`). 디스패치 직전 멱등 라인편집으로 적용, 미설정 depth 는
+  base 스냅샷 복원. `POST /models/tiers` 는 부분 갱신(model/reasoning 독립)으로 확장.
+- **§37 Heavy 멀티모달 보존**: 이미지 동봉 요청이 Heavy 큐로 분류되어도 이미지
+  파트(image_url/input_image)를 표준형으로 정규화해 Task 에 저장(`attachments`)하고,
+  run 시작 시(단일·스텝 실행 모두) 사용자 메시지에 재동봉 — 기존에는 텍스트만 남아
+  이미지가 유실됐다. Light 경로는 종전대로 원본 패스스루.
+- **§29.3 확장 — 임의 설정 get/set**: `alphred tune --get <path>` ·
+  `--set <path> <value>` 로 KNOBS 밖 Hermes 스칼라(agent.max_turns,
+  auxiliary.\*.model 등)를 백업·멱등 규칙 그대로 조회·조정(신규 키 삽입은 거부,
+  `--revert` 로 원복).
+
+### 수정 (Fixed)
+
+- **§29.1 크로스 프로바이더 tier 복원 버그**: provider/base_url 을 지정한 tier 실행 후
+  미설정 depth 로 복귀할 때 이전 tier 의 provider 가 config.yaml 에 잔류하던 문제 —
+  첫 tier 설정 시 base 를 model+provider+base_url 로 스냅샷하고 복귀 시 전체 복원.
+- **§29.1 종료 시 tier 잔류**: 게이트웨이 종료 시 config.yaml 을 base 모델·추론 깊이로
+  복원 — Alphred 종료 후 독립 실행한 Hermes 가 마지막 tier 의 (비싼) 모델/추론으로
+  동작하던 문제 해소.
+
 - **§36 TUI 대개편 T1(기반 전환)**: 위젯 채팅(도구 블록 `●/⎿` 제자리 갱신) · 최종 답변
   마크다운 렌더 · 컴팩트 웰컴 패널(전체 아트는 `/banner`) · 상태줄(스피너+경과시간,
   큐 배지 `▶⏳❓⚠`, depth/모델/세션) · PgUp/PgDn 채팅 스크롤

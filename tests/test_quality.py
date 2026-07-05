@@ -25,6 +25,7 @@ from alphred.runtime import make_model_applier
 _CFG_YAML = (
     "model:\n  default: nvidia/base-model\n  provider: nvidia\n"
     "  base_url: https://integrate.api.nvidia.com/v1\n"
+    "agent:\n  max_turns: 150\n"
     "compression:\n  enabled: true\n  threshold: 0.5\n  protect_first_n: 3\n"
     "  protect_last_n: 20\n"
     "tools:\n  tool_search:\n    enabled: auto\n    threshold_pct: 10\n"
@@ -39,7 +40,8 @@ def _cfg(tmp_path, monkeypatch, **env) -> Config:
     (hh / "config.yaml").write_text(_CFG_YAML, encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(hh))
     monkeypatch.setenv("ALPHRED_HOME", str(tmp_path / "alphred"))
-    for k in ("ALPHRED_MODEL_HIGH", "ALPHRED_MODEL_MID", "ALPHRED_MODEL_LOW"):
+    for k in ("ALPHRED_MODEL_HIGH", "ALPHRED_MODEL_MID", "ALPHRED_MODEL_LOW",
+              "ALPHRED_REASONING_HIGH", "ALPHRED_REASONING_MID", "ALPHRED_REASONING_LOW"):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -143,6 +145,36 @@ def test_models_default_endpoint(tmp_path, monkeypatch):
     assert read_default_model(cfg.hermes_home) == "meta/llama-3.3-70b-instruct"
 
 
+def test_models_tiers_reasoning_endpoints(tmp_path, monkeypatch):
+    """POST /models/reasoning(전역) · /models/tiers 부분 갱신(model/reasoning 독립)."""
+    from alphred.config import read_reasoning_effort
+    cfg = _cfg(tmp_path, monkeypatch)
+    store = Store(tmp_path / "g2.db")
+    mgr = QueueManager(store, _FakeUp(), tmp_path / "QUEUE.MD")
+    with TestClient(create_app(cfg, mgr=mgr, scheduler_interval=3600)) as tc:
+        # 전역 설정 + 레벨 검증
+        assert tc.post("/models/reasoning", json={"value": "ultra"}).status_code == 400
+        r = tc.post("/models/reasoning", json={"value": "high"})
+        assert r.status_code == 200 and r.json()["reasoning_effort"] == "high"
+        assert read_reasoning_effort(cfg.hermes_home) == "high"
+        assert tc.get("/models/tiers").json()["reasoning_effort"] == "high"
+        # tier 부분 갱신: model 설정 후 reasoning 만 추가 → 둘 다 유지
+        tc.post("/models/tiers", json={"tier": "high", "model": "nvidia/strong"})
+        tc.post("/models/tiers", json={"tier": "high", "reasoning": "xhigh"})
+        d = tc.get("/models/tiers").json()
+        assert d["tiers"]["high"]["model"] == "nvidia/strong"
+        assert d["tiers"]["high"]["reasoning"] == "xhigh"
+        # model 교체에도 reasoning 보존
+        tc.post("/models/tiers", json={"tier": "high", "model": "nvidia/other"})
+        assert tc.get("/models/tiers").json()["tiers"]["high"]["reasoning"] == "xhigh"
+        # reasoning 해제 → 모델만 남음, 이어서 model 해제 → tier 제거
+        tc.post("/models/tiers", json={"tier": "high", "reasoning": None})
+        assert "reasoning" not in tc.get("/models/tiers").json()["tiers"]["high"]
+        tc.post("/models/tiers", json={"tier": "high", "model": None})
+        d = tc.get("/models/tiers").json()
+        assert d["tiers"]["high"] is None and d["enabled"] is False
+
+
 def test_model_applier_writes_per_depth_and_noop_without_tiers(tmp_path, monkeypatch):
     # tier 미설정 → config.yaml 절대 안 건드림(완전 무변화)
     cfg = _cfg(tmp_path, monkeypatch)
@@ -156,6 +188,106 @@ def test_model_applier_writes_per_depth_and_noop_without_tiers(tmp_path, monkeyp
     assert read_default_model(cfg.hermes_home) == "nvidia/strong-70b"
     apply("mid")
     assert read_default_model(cfg.hermes_home) == "nvidia/base-model"
+
+
+# ───────────────────────── §29.1 확장: depth별 추론 깊이 ─────────────────────────
+
+def test_set_reasoning_effort_insert_edit_idempotent(tmp_path, monkeypatch):
+    """agent.reasoning_effort 라인편집 — 키 부재 시 삽입, 동일값 미기록, '' 복원."""
+    from alphred.config import read_reasoning_effort, set_reasoning_effort
+    cfg = _cfg(tmp_path, monkeypatch)
+    assert read_reasoning_effort(cfg.hermes_home) is None      # 키 부재(구버전 config)
+    assert set_reasoning_effort(cfg.hermes_home, "high") is True   # agent: 블록에 삽입
+    assert read_reasoning_effort(cfg.hermes_home) == "high"
+    assert set_reasoning_effort(cfg.hermes_home, "high") is False  # 멱등(미기록)
+    assert set_reasoning_effort(cfg.hermes_home, "xhigh") is True
+    assert read_reasoning_effort(cfg.hermes_home) == "xhigh"
+    assert set_reasoning_effort(cfg.hermes_home, "") is True       # '' = Hermes 기본 복원
+    assert read_reasoning_effort(cfg.hermes_home) == ""
+    # 다른 블록/키는 무손질
+    assert read_config_scalar(cfg.hermes_home, ["agent", "max_turns"]) == "150"
+    assert read_config_scalar(cfg.hermes_home, ["compression", "threshold"]) == "0.5"
+
+
+def test_reasoning_for_depth_precedence_and_snapshot(tmp_path, monkeypatch):
+    from alphred.config import set_reasoning_effort
+    # env 우선
+    cfg = _cfg(tmp_path, monkeypatch, ALPHRED_REASONING_HIGH="xhigh")
+    assert cfg.reasoning_for_depth("high") == "xhigh"
+    assert cfg.has_reasoning_tiers() is True
+    # models.json tier + 첫 설정 시 base_reasoning 스냅샷
+    cfg2 = _cfg(tmp_path, monkeypatch)
+    assert cfg2.has_reasoning_tiers() is False
+    set_reasoning_effort(cfg2.hermes_home, "medium")             # 현재 전역값
+    cfg2.set_tier_model("high", {"model": "nvidia/strong", "reasoning": "xhigh"})
+    assert cfg2.reasoning_for_depth("high") == "xhigh"
+    assert cfg2.reasoning_for_depth("mid") is None
+    assert cfg2.reasoning_base_default() == "medium"
+    tiers = cfg2.get_tiers()
+    assert tiers["high"]["reasoning"] == "xhigh"
+    assert tiers["base_reasoning"] == "medium"
+    # reasoning 만 있는 tier 도 유효 — 단 모델 라우팅은 켜지지 않는다
+    cfg2.set_tier_model("high", None)
+    cfg2.set_tier_model("low", {"reasoning": "minimal"})
+    assert cfg2.has_model_tiers() is False
+    assert cfg2.has_reasoning_tiers() is True
+    # 잘못된 레벨 거부
+    with pytest.raises(ValueError):
+        cfg2.set_tier_model("mid", {"reasoning": "ultra"})
+
+
+def test_model_applier_restores_provider_across_tiers(tmp_path, monkeypatch):
+    """크로스 프로바이더 tier 후 미설정 depth 복귀 시 provider/base_url 도 base 로 복원."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    cfg.set_tier_model("high", {"model": "google/gemma-4-31b-it", "provider": "google",
+                                "base_url": "https://g/v1"})
+    apply = make_model_applier(cfg)
+    apply("high")
+    assert read_default_model(cfg.hermes_home) == "google/gemma-4-31b-it"
+    assert read_config_scalar(cfg.hermes_home, ["model", "provider"]) == "google"
+    apply("mid")                                   # 미설정 depth → base 전체 복원
+    assert read_default_model(cfg.hermes_home) == "nvidia/base-model"
+    assert read_config_scalar(cfg.hermes_home, ["model", "provider"]) == "nvidia"
+    assert (read_config_scalar(cfg.hermes_home, ["model", "base_url"])
+            == "https://integrate.api.nvidia.com/v1")
+
+
+def test_restore_base_model_on_shutdown(tmp_path, monkeypatch):
+    """종료 시 복원 — tier 가 남긴 모델/provider/추론 깊이를 base 로 되돌린다."""
+    from alphred.config import read_reasoning_effort, set_reasoning_effort
+    from alphred.runtime import restore_base_model
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_reasoning_effort(cfg.hermes_home, "medium")
+    cfg.set_tier_model("high", {"model": "google/gemma-4-31b-it", "provider": "google",
+                                "reasoning": "xhigh"})
+    apply = make_model_applier(cfg)
+    apply("high")
+    assert read_default_model(cfg.hermes_home) == "google/gemma-4-31b-it"
+    assert read_reasoning_effort(cfg.hermes_home) == "xhigh"
+    restore_base_model(cfg)
+    assert read_default_model(cfg.hermes_home) == "nvidia/base-model"
+    assert read_config_scalar(cfg.hermes_home, ["model", "provider"]) == "nvidia"
+    assert read_reasoning_effort(cfg.hermes_home) == "medium"
+    # tier 미설정이면 완전 무동작
+    cfg2 = _cfg(tmp_path, monkeypatch)
+    restore_base_model(cfg2)
+    assert read_default_model(cfg2.hermes_home) == "nvidia/base-model"
+
+
+def test_model_applier_applies_reasoning_per_depth(tmp_path, monkeypatch):
+    from alphred.config import read_reasoning_effort, set_reasoning_effort
+    cfg = _cfg(tmp_path, monkeypatch)
+    set_reasoning_effort(cfg.hermes_home, "medium")
+    apply = make_model_applier(cfg)
+    apply("high")                                        # tier 미설정 → 완전 무동작
+    assert read_reasoning_effort(cfg.hermes_home) == "medium"
+    cfg.set_tier_model("high", {"reasoning": "xhigh"})   # reasoning-only tier
+    apply = make_model_applier(cfg)
+    apply("high")
+    assert read_reasoning_effort(cfg.hermes_home) == "xhigh"
+    assert read_default_model(cfg.hermes_home) == "nvidia/base-model"  # 모델은 무손질
+    apply("mid")                                         # 미설정 depth → base 복원
+    assert read_reasoning_effort(cfg.hermes_home) == "medium"
 
 
 class _FakeRun:
@@ -356,6 +488,21 @@ def test_tune_audit_apply_revert(tmp_path, monkeypatch):
     # revert → 원복
     assert tune.revert(cfg) is True
     assert read_config_scalar(cfg.hermes_home, ["compression", "protect_first_n"]) == "3"
+
+
+def test_tune_get_set_arbitrary_scalar(tmp_path, monkeypatch):
+    """§29.3 확장 — KNOBS 밖 임의 스칼라 get/set(백업·멱등·키 부재 거부·원복)."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    assert tune.get_scalar(cfg, "agent.max_turns") == "150"
+    assert tune.get_scalar(cfg, "agent.nope") is None
+    r = tune.set_scalar(cfg, "agent.max_turns", 200)
+    assert r["ok"] and r["changed"]
+    assert read_config_scalar(cfg.hermes_home, ["agent", "max_turns"]) == "200"
+    assert tune.set_scalar(cfg, "agent.max_turns", 200)["changed"] is False   # 멱등
+    bad = tune.set_scalar(cfg, "agent.nope", 1)                # 신규 키 삽입 거부
+    assert bad["ok"] is False and "없습니다" in bad["error"]
+    assert tune.revert(cfg) is True                            # 백업 원복
+    assert tune.get_scalar(cfg, "agent.max_turns") == "150"
 
 
 # ───────────────────────── §29.4 Alphred-side MoA ─────────────────────────

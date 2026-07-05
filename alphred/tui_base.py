@@ -44,6 +44,7 @@ def _short_sid(sid: str) -> str:
 _COMMANDS = [
     ("help", "사용 가능한 명령 목록", False, "cmd_help"),
     ("model", "모델 영구 전환/보기  (예: /model meta/llama-3.3-70b-instruct · 깊이별: /model high|mid|low <이름>)", True, "cmd_model"),
+    ("reasoning", "추론 깊이 설정/보기  (예: /reasoning xhigh · 깊이별: /reasoning high xhigh · 해제: auto)", True, "cmd_reasoning"),
     ("plan", "드라이런 — 실행 전 심화도/계획/비용 견적 미리보기  (예: /plan 보고서 만들어줘)", True, "cmd_plan"),
     ("depth", "작업 심화도 고정/해제  (예: /depth high, /depth auto)", True, "cmd_depth"),
     ("sessions", "저장된 세션 목록 / 전환 / 삭제  (번호 또는 ID; 예: /sessions, /sessions 2, /sessions delete a1b2c3d4)", True, "cmd_sessions"),
@@ -54,6 +55,8 @@ _COMMANDS = [
     ("skills", "설치된 스킬 목록", False, "cmd_skills"),
     ("export", "현재 세션 대화를 Markdown 파일로 저장  (예: /export, /export report.md)", True, "cmd_export"),
     ("banner", "Alph-RED 전체 배너/로고 표시", False, "cmd_banner"),
+    ("slot", "동시 실행 슬롯 설정/보기  (예: /slot, /slot 3, /slot auto, /slot max 6)", True, "cmd_slot"),
+    ("exit", "종료", False, "cmd_exit"),
     ("quit", "종료", False, "cmd_quit"),
 ]
 

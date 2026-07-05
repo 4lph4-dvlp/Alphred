@@ -174,6 +174,21 @@ class Store:
     def in_progress(self) -> list[Task]:
         return self.list(states=[TaskState.IN_PROGRESS.value])
 
+    def recent_finished(self, session_key: str, limit: int = 5) -> list[Task]:
+        """세션의 최근 종결(Completed/NeedsReview) 작업 — §40 원장용, 최신 우선.
+
+        Discarded 는 제외(사용자가 버린 작업은 후속 참조 가치가 낮고 오염 위험).
+        """
+        if not session_key:
+            return []
+        cur = self._conn.execute(
+            "SELECT * FROM tasks WHERE session_key=? AND state IN (?, ?) "
+            "ORDER BY COALESCE(finished_at, updated_at) DESC LIMIT ?",
+            (session_key, TaskState.COMPLETED.value, TaskState.NEEDS_REVIEW.value,
+             int(limit)),
+        )
+        return [self._to_task(r) for r in cur.fetchall()]
+
     def events(self, task_id: str) -> list[dict]:
         rows = self._conn.execute(
             "SELECT from_state,to_state,reason,at FROM task_events WHERE task_id=? ORDER BY id",
