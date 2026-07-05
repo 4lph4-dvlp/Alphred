@@ -17,3 +17,5 @@ QUEUE.MD
 docs/
 *.exe
 scratch/
+.claude/
+CHANGELOG.md
