@@ -2,6 +2,8 @@
 
 **English** | [한국어](README_ko.md)
 
+![AlphredLogo](alphred/assets/Alphred_Logo.png)
+
 > A priority-queue middleware and state-control wrapper that sits on top of
 > [Hermes Agent](https://github.com/NousResearch/hermes-agent) — **without modifying its core.**
 
@@ -10,8 +12,6 @@ Talk to Alphred like any AI assistant. When you ask for something quick ("transl
 ("refactor the whole codebase", "crawl and summarize these 200 pages"), it queues the work,
 runs it in the background by priority, and pauses lower-priority work when something urgent
 arrives — then resumes it. **You don't have to label anything; Alphred decides.**
-
-Full design doc: [`docs/Alphred-실행기획안.md`](docs/Alphred-실행기획안.md) (Korean)
 
 ---
 

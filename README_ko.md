@@ -2,6 +2,8 @@
 
 [English](README.md) | **한국어**
 
+![AlphredLogo](alphred/assets/Alphred_Logo.png)
+
 > [Hermes Agent](https://github.com/NousResearch/hermes-agent) 위에 얹는
 > **우선순위 큐 미들웨어 + 상태 제어 머신** 래퍼 — **코어는 수정하지 않는다.**
 
@@ -9,8 +11,6 @@
 **즉시** 답하고, 무거운 요청("전체 코드베이스 리팩토링해줘", "이 200페이지 크롤링해서 요약해줘")은
 큐에 넣어 우선순위대로 백그라운드에서 처리합니다. 급한 게 들어오면 진행 중인 작업을 잠시 멈추고
 먼저 처리한 뒤 다시 이어갑니다. **무엇이 급한지는 사용자가 표시하지 않아도 Alphred가 판단합니다.**
-
-전체 설계 문서: [`docs/Alphred-실행기획안.md`](docs/Alphred-실행기획안.md)
 
 ---
 
