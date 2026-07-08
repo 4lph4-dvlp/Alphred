@@ -105,4 +105,4 @@ def test_setup_creates_env_template(monkeypatch, tmp_path):
     assert env_path.exists()
     text = env_path.read_text(encoding="utf-8")
     assert "ALPHRED_GATEWAY_URL" in text
-    assert "ALPHRED_PROFILE" in text
+    assert "ALPHRED_HERMES_API" in text
