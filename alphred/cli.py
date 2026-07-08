@@ -386,7 +386,15 @@ def _cmd_setup(argv: list[str]) -> int:
     gateway_url = f"http://{host}:{port}"
 
     curr_key = cfg.api_key or ""
-    api_key = _prompt_input("\n게이트웨이 보안 접속 키(API Key)를 설정하세요 (외부 접속 허용 시 권장, 빈 칸이면 비활성화)", curr_key)
+    while True:
+        api_key = _prompt_input("\n게이트웨이 보안 접속 키(API Key)를 설정하세요 (외부 접속 허용 시 권장, 최소 16자 이상, 빈 칸이면 비활성화)", curr_key)
+        if not api_key:
+            break
+        if len(api_key) < 16:
+            print("오류: API Key는 보안을 위해 최소 16자 이상이어야 합니다 (Hermes 엔진 요구사항).")
+            curr_key = ""
+        else:
+            break
 
     curr_hermes = cfg.api_base_url or "http://localhost:8642/v1"
     hermes_api = _prompt_input("\n연동할 업스트림 Hermes API 주소를 입력하세요", curr_hermes)
