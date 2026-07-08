@@ -303,78 +303,200 @@ def _ensure_daemon():
 
 def _cmd_setup(argv: list[str]) -> int:
     import argparse
-
+    import sys
+    from urllib.parse import urlparse
     from .config import PROFILES, read_profile, set_profile
 
     p = argparse.ArgumentParser(
         prog="alphred setup",
-        description="Alphred 초기 설정 — Hermes(LLM provider 등) 온보딩 + 프로파일 선택. "
-                    "Hermes 는 순정 유지(브랜딩 안 함).")
-    p.add_argument("--no-launch", action="store_true",
-                   help="Hermes 온보딩에 진입하지 않고 안내만")
+        description="Alphred 초기 및 상세 설정 마법사")
     p.add_argument("--profile", choices=PROFILES, default=None,
-                   help="§35.4 프리셋 영구 설정 — basic(큐/선점/검증만) · "
-                        "smart(+의도판정·계획, 권장) · full(+질문·스텝실행·감시)")
+                   help="프로파일 프리셋 영구 설정 (basic, smart, full)")
     args = p.parse_args(argv)
 
     cfg = Config.load()
-    # §35.4 프로파일 — 플래그로 지정하거나, 대화형(TTY)에서 미설정이면 1회 질문.
-    if args.profile:
-        set_profile(cfg.alphred_home, args.profile)
-        print(f"프로파일 설정됨: {args.profile}  (변경: alphred setup --profile <이름>)")
-    elif read_profile(cfg.alphred_home) is None and sys.stdin.isatty():
-        print("Alphred 동작 프로파일을 고르세요 (나중에 `alphred setup --profile` 로 변경):")
-        print("  1) basic — 큐/선점/검증만 (LLM 보조 호출 최소)")
-        print("  2) smart — + LLM 의도 판정·실행 계획 (권장, 질문 없음)")
-        print("  3) full  — + 착수 전 확인 질문·스텝 단위 실행·실행 감시")
-        try:
-            pick = input("선택 [2]: ").strip() or "2"
-        except EOFError:
-            pick = "2"
-        name = {"1": "basic", "2": "smart", "3": "full"}.get(pick, "smart")
-        set_profile(cfg.alphred_home, name)
-        print(f"프로파일 설정됨: {name}")
-    # .env 템플릿 생성
     env_path = cfg.alphred_home / ".env"
-    if not env_path.exists():
+
+    def _prompt_input(prompt_text: str, default_value: str | None = None) -> str:
+        default_str = f" [{default_value}]" if default_value is not None else ""
         try:
+            val = input(f"{prompt_text}{default_str}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            val = ""
+        return val if val else (default_value or "")
+
+    # 만약 TTY가 아니거나 인자로 profile만 직접 넘어왔다면 비대화형 실행
+    if not sys.stdin.isatty() or args.profile:
+        profile = args.profile or read_profile(cfg.alphred_home) or "smart"
+        set_profile(cfg.alphred_home, profile)
+        print(f"프로파일 설정됨: {profile}")
+        # 비대화형일 때 기본 .env가 없으면 기본값으로 자동 생성
+        if not env_path.exists():
+            parsed = urlparse(cfg.gateway_url)
+            host = parsed.hostname or "localhost"
+            port = str(parsed.port or 8643)
             env_template = (
                 "# ==============================================================================\n"
-                "# Alphred Environment Configuration Template\n"
+                "# Alphred Environment Configuration\n"
                 "# ==============================================================================\n"
-                "# 이 파일은 Alphred에서 독자적으로 사용하는 환경변수 설정 파일입니다.\n"
-                "# 사용하고자 하는 환경변수의 주석(#)을 제거하고 적절한 값을 입력해 주세요.\n"
-                "# 모든 OS(Windows, macOS, Linux)에서 호환됩니다.\n"
+                "# 이 파일은 Alphred 설정 마법사에 의해 자동 생성된 환경변수 파일입니다.\n"
                 "# ==============================================================================\n\n"
                 "# [네트워크 및 접속 설정]\n"
-                "# 외부 기기(Tailscale 등)에서 웹이나 TUI 클라이언트로 접속할 때 사용할 URL 및 포트입니다.\n"
-                "# 외부 접속 시에는 반드시 접속 키가 발급되어 있거나 ALPHRED_API_KEY가 설정되어 있어야 합니다.\n"
-                "# ALPHRED_GATEWAY_URL=http://localhost:8643\n\n"
-                "# Gateway 인증을 위해 사용하는 API Key입니다. 외부 클라이언트가 API를 호출하거나 접속할 때 필요합니다.\n"
+                f"ALPHRED_GATEWAY_URL=http://{host}:{port}\n\n"
                 "# ALPHRED_API_KEY=\n\n"
-                "# 업스트림 Hermes API 서버의 주소입니다. (기본값: http://localhost:8642/v1)\n"
-                "# ALPHRED_HERMES_API=http://localhost:8642/v1\n"
+                f"ALPHRED_HERMES_API={cfg.api_base_url}\n"
             )
-            env_path.write_text(env_template, encoding="utf-8")
-            print(f"환경변수 템플릿 파일 생성됨: {env_path}")
-        except Exception as e:
-            sys.stderr.write(f"alphred: .env 템플릿 파일 생성 실패 ({e})\n")
-
-    if not cfg.hermes_bin:
-        sys.stderr.write(
-            "alphred: hermes 실행 파일을 찾을 수 없습니다. "
-            "Hermes 를 먼저 설치하거나 ALPHRED_HERMES_BIN 을 설정하세요.\n")
-        return 127
-
-    # 새 컨셉(§15): Alphred 는 Hermes 를 브랜딩하지 않는다(순정 유지). 정체성은 전용 TUI 가 담당.
-    print("Alphred 설정: Hermes 는 순정 그대로 둡니다(스킨/정체성/훅 미설치).")
-    print("다기기 접속: 서버에서 `alphred keys issue <기기이름>` → 기기에서 "
-          "`alphred connect <서버URL> --key <키>`.")
-    if args.no_launch:
-        print("준비 완료. 큐 결합 대화는 `alphred`, 순수 Hermes 는 `hermes`. 점검: `alphred doctor`.")
+            try:
+                env_path.write_text(env_template, encoding="utf-8")
+                print(f"환경변수 설정 파일 생성됨: {env_path}")
+            except Exception as e:
+                sys.stderr.write(f"alphred: .env 생성 실패 ({e})\n")
+        print("설정이 완료되었습니다.")
         return 0
-    print("Hermes 온보딩으로 진입합니다… (LLM provider 등 설정)")
-    return _delegate_to_hermes([])
+
+    print("================================================================================")
+    print("Alphred 설정 마법사에 오신 것을 환영합니다!")
+    print("================================================================================\n")
+
+    # 1. 설정 모드 선택
+    print("설정 모드를 선택해 주세요:")
+    print("  1) 기본 설정 (Minimum) - 필수적인 네트워크 및 인증 설정")
+    print("  2) 전체 상세 설정 (Full) - 리소스 제한, 모델 오버라이드 및 고급 기능 포함")
+    mode = _prompt_input("선택 [1]", "1")
+
+    # 2. 동작 프로파일 설정
+    curr_prof = read_profile(cfg.alphred_home) or "smart"
+    print("\n동작 프로파일을 선택해 주세요:")
+    print("  1) basic - 큐/선점/검증 위주 (최소 LLM 호출)")
+    print("  2) smart - + 의도판정 및 실행계획 자동 수립 (기본값, 권장)")
+    print("  3) full  - + 착수 전 질문, 스텝 단위 실행 및 실행 감시")
+    default_opt = "2" if curr_prof == "smart" else ("1" if curr_prof == "basic" else "3")
+    pick_prof = _prompt_input("선택", default_opt)
+    profile = {"1": "basic", "2": "smart", "3": "full"}.get(pick_prof, "smart")
+    set_profile(cfg.alphred_home, profile)
+    print(f"-> 프로파일 설정됨: {profile}")
+
+    # 3. 네트워크 및 접속 설정
+    parsed = urlparse(cfg.gateway_url)
+    curr_host = parsed.hostname or "localhost"
+    curr_port = str(parsed.port or 8643)
+
+    host = _prompt_input("\n게이트웨이 호스트 주소를 입력하세요 (로컬 전용: localhost, 외부/Tailscale 허용: 0.0.0.0 또는 특정 IP)", curr_host)
+    port = _prompt_input("게이트웨이 포트 번호를 입력하세요", curr_port)
+    gateway_url = f"http://{host}:{port}"
+
+    curr_key = cfg.api_key or ""
+    api_key = _prompt_input("\n게이트웨이 보안 접속 키(API Key)를 설정하세요 (외부 접속 허용 시 권장, 빈 칸이면 비활성화)", curr_key)
+
+    curr_hermes = cfg.api_base_url or "http://localhost:8642/v1"
+    hermes_api = _prompt_input("\n연동할 업스트림 Hermes API 주소를 입력하세요", curr_hermes)
+
+    # 4. Full 상세 설정 (모드 2일 때만 실행)
+    slots = "1"
+    slots_max = 4
+    model_high = ""
+    model_mid = ""
+    model_low = ""
+    orchestrate = "1" if profile == "full" else "0"
+    watchdog = "1" if profile == "full" else "0"
+    judge = "0"
+    moa = "0"
+
+    if mode == "2":
+        print("\n--- [추가 리소스 및 고급 파이프라인 설정 (Full 모드)] ---")
+        curr_slots = getattr(cfg, "slots", "1")
+        curr_slots_max = getattr(cfg, "slots_max", 4)
+        slots = _prompt_input("동시 실행 슬롯 개수를 설정하세요 (정수 또는 auto)", str(curr_slots))
+        slots_max = int(_prompt_input("최대 동시 실행 슬롯 개수 제한을 설정하세요", str(curr_slots_max)))
+
+        print("\n[LLM 모델 오버라이드 설정 (미입력 시 기본 모델 사용)]")
+        model_high = _prompt_input("High 심화도 작업용 LLM 모델 지정 (예: openrouter/google/gemini-2.5-pro)", getattr(cfg, "model_high", "") or "")
+        model_mid = _prompt_input("Mid 심화도 작업용 LLM 모델 지정 (예: openrouter/google/gemini-2.5-flash)", getattr(cfg, "model_mid", "") or "")
+        model_low = _prompt_input("Low 심화도 작업용 LLM 모델 지정", getattr(cfg, "model_low", "") or "")
+
+        print("\n[고급 파이프라인 기능 수동 제어 (1: 활성화, 0: 비활성화)]")
+        d_orch = "1" if getattr(cfg, "orchestrate", profile == "full") else "0"
+        d_watch = "1" if getattr(cfg, "watchdog", profile == "full") else "0"
+        d_judge = "1" if getattr(cfg, "judge", False) else "0"
+        d_moa = "1" if getattr(cfg, "moa", False) else "0"
+        
+        orchestrate = _prompt_input("Plan v2 스텝 단위 자율 실행(StepRunner) 여부", d_orch)
+        watchdog = _prompt_input("도구오류 복구/무진전 감시(Watchdog) 여부", d_watch)
+        judge = _prompt_input("LLM-judge 기반 완료 검증 여부", d_judge)
+        moa = _prompt_input("Mixture of Agents(MoA) 활성화 여부", d_moa)
+
+    # 5. .env 파일 생성 및 저장
+    env_lines = [
+        "# ==============================================================================",
+        "# Alphred Environment Configuration",
+        "# ==============================================================================",
+        "# 이 파일은 Alphred 설정 마법사(setup)에 의해 자동 생성된 환경변수 파일입니다.",
+        "# ==============================================================================\n",
+        "# [네트워크 및 접속 설정]",
+        f"ALPHRED_GATEWAY_URL={gateway_url}",
+    ]
+    if api_key:
+        env_lines.append(f"ALPHRED_API_KEY={api_key}")
+    else:
+        env_lines.append("# ALPHRED_API_KEY=")
+    env_lines.append(f"ALPHRED_HERMES_API={hermes_api}")
+
+    if mode == "2":
+        env_lines.extend([
+            "\n# [실행 리소스 설정]",
+            f"ALPHRED_SLOTS={slots}",
+            f"ALPHRED_SLOTS_MAX={slots_max}",
+            "\n# [LLM 모델 라우팅 오버라이드]",
+        ])
+        env_lines.append(f"ALPHRED_MODEL_HIGH={model_high}" if model_high else "# ALPHRED_MODEL_HIGH=")
+        env_lines.append(f"ALPHRED_MODEL_MID={model_mid}" if model_mid else "# ALPHRED_MODEL_MID=")
+        env_lines.append(f"ALPHRED_MODEL_LOW={model_low}" if model_low else "# ALPHRED_MODEL_LOW=")
+        
+        env_lines.extend([
+            "\n# [고급 파이프라인 수동 제어]",
+            f"ALPHRED_ORCHESTRATE={orchestrate}",
+            f"ALPHRED_WATCHDOG={watchdog}",
+            f"ALPHRED_JUDGE={judge}",
+            f"ALPHRED_MOA={moa}",
+        ])
+    
+    try:
+        env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+        print(f"\n-> 환경변수 설정 저장 완료: {env_path}")
+    except Exception as e:
+        sys.stderr.write(f"\nalphred: .env 저장 실패 ({e})\n")
+
+    # 6. Hermes 최적화(tune) 연동 질문
+    print("\n================================================================================")
+    print("Hermes 엔진 최적화(Tuning)")
+    print("================================================================================")
+    tune_ans = _prompt_input("Hermes 엔진의 최적화 권장 설정(knobs)을 자동으로 점검하고 적용하시겠습니까? (y/n)", "n")
+    if tune_ans.lower() in ("y", "yes"):
+        try:
+            from . import tune as _tune
+            print("Hermes 설정을 최적화하는 중...")
+            tune_res = _tune.apply(cfg, None)
+            print(f"-> 적용 완료: {', '.join(tune_res['applied']) or '(없음 — 이미 권장값이거나 키 부재)'}")
+            if tune_res["skipped"]:
+                print(f"-> 건너뜀: {', '.join(tune_res['skipped'])}")
+            print(f"-> 백업 생성: {tune_res['backup']}")
+        except Exception as e:
+            print(f"-> 최적화 적용 실패: {e}")
+
+    # 7. 완료 및 종료 안내 메시지
+    print("\n================================================================================")
+    print("Alphred 설정이 성공적으로 완료되었습니다!")
+    print("================================================================================\n")
+    print(f"설정 파일 보존 경로: {env_path}")
+    print("\nTUI 챗봇 기동하기:")
+    print("  $ alphred")
+    print("\n다른 기기에서 원격 접속 허용하기:")
+    print("  1. 서버에서 접속 보안 키 발급:")
+    print("     $ alphred keys issue <기기이름>")
+    print("  2. 접속할 기기에서 연결:")
+    print(f"     $ alphred connect http://{host if host != '0.0.0.0' else '<서버IP>'}:{port} --key <발급된키>")
+    print("\n================================================================================\n")
+    return 0
 
 
 def _cmd_prompt(argv: list[str]) -> int:

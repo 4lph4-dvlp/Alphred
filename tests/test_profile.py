@@ -98,7 +98,7 @@ def test_setup_creates_env_template(monkeypatch, tmp_path):
     monkeypatch.setenv("ALPHRED_HERMES_BIN", str(hermes_bin))
 
     from alphred.cli import _cmd_setup
-    res = _cmd_setup(["--profile", "basic", "--no-launch"])
+    res = _cmd_setup(["--profile", "basic"])
     assert res == 0
 
     env_path = alphred_dir / ".env"
