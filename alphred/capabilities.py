@@ -364,6 +364,7 @@ class CapabilityRegistry:
         with self._lock:
             now = time.monotonic()
             if (not force and self._data is not None
+                    and self._collected_mono > 0.0
                     and now - self._collected_mono < self.ttl):
                 return self._data
             prev = self._data or self._load_file() or {}

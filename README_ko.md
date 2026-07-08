@@ -147,8 +147,28 @@ alphred keys issue 노트북             # 키는 지금 한 번만 표시(서�
 alphred keys issue 모니터 --scope read  # read=모니터링 전용(GET만) / control=전부
 alphred keys list / revoke <이름>     # 회수 = 그 기기 즉시 차단
 alphred serve --host 0.0.0.0          # 외부 바인딩은 명시적으로 — 키 없이는 기동 거부
+alphred setup                         # 설정 템플릿을 ~/.hermes/alphred/.env 에 생성
 alphred service install               # 선택: 로그온 시 자동 기동(schtasks/systemd/launchd)
 ```
+
+### `.env` 파일을 통한 영구 설정
+
+다음 경로에 환경변수를 저장하여 설정을 영구적으로 유지할 수 있습니다:
+- `~/.hermes/alphred/.env` (또는 `~/.hermes/.env`)
+
+`alphred setup` 명령어를 실행하면 `~/.hermes/alphred/.env` 경로에 사용 가능한 모든 환경변수의 설명과 예시가 포함된 `.env` 템플릿 파일이 자동으로 생성됩니다 (Windows, macOS, Linux 전체 호환).
+
+예를 들어, Tailscale 네트워크 인터페이스에 서버를 바인딩하여 다른 기기에서 접속 가능하게 설정하려면:
+1. 외부 기기용 접속 키를 먼저 발급합니다:
+   ```bash
+   alphred keys issue ipad
+   ```
+2. `alphred setup`을 실행해 `.env` 템플릿을 생성합니다.
+3. `~/.hermes/alphred/.env` 파일을 열고 `ALPHRED_GATEWAY_URL` 주석을 해제하여 아래와 같이 기재합니다:
+   ```env
+   ALPHRED_GATEWAY_URL=http://<Tailscale-IP-또는-0.0.0.0>:8643
+   ```
+4. 이후 단순히 `alphred` 명령어로 TUI를 시작하면, 백그라운드 데몬 서버가 자동으로 설정된 Tailscale IP와 포트로 기동되어 같은 Tailscale 네트워크의 다른 장치에서 웹 챗(`http://<Tailscale-IP>:8643/chat`)이나 대시보드에 접근할 수 있게 됩니다.
 
 신뢰 LAN 밖 접속은 :8643 앞에 TLS 리버스 프록시(Caddy/nginx)를 두세요.
 

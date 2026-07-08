@@ -58,3 +58,51 @@ def test_keys_cli_roundtrip(monkeypatch, tmp_path, capsys):
     capsys.readouterr()
     assert _cmd_keys(["revoke", "노트북"]) == 0
     assert _cmd_keys(["revoke", "노트북"]) == 1              # 이미 없음
+
+
+def test_env_file_loading(monkeypatch, tmp_path):
+    hermes_dir = tmp_path / "hermes_home"
+    alphred_dir = tmp_path / "alphred_home"
+    hermes_dir.mkdir()
+    alphred_dir.mkdir()
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_dir))
+    monkeypatch.setenv("ALPHRED_HOME", str(alphred_dir))
+
+    monkeypatch.delenv("ALPHRED_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("ALPHRED_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("ALPHRED_PROFILE", raising=False)
+
+    (hermes_dir / ".env").write_text("ALPHRED_GATEWAY_URL=http://100.99.88.77:9999\n# Comment\nALPHRED_MAX_RETRIES=5", encoding="utf-8")
+    (alphred_dir / ".env").write_text("ALPHRED_PROFILE=smart\nALPHRED_MAX_RETRIES=99", encoding="utf-8")
+
+    cfg = Config.load()
+    assert cfg.gateway_url == "http://100.99.88.77:9999"
+    assert cfg.max_retries == 5
+    assert cfg.profile == "smart"
+
+
+def test_setup_creates_env_template(monkeypatch, tmp_path):
+    hermes_dir = tmp_path / "hermes_home"
+    alphred_dir = tmp_path / "alphred_home"
+    hermes_dir.mkdir()
+    alphred_dir.mkdir()
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_dir))
+    monkeypatch.setenv("ALPHRED_HOME", str(alphred_dir))
+
+    (hermes_dir / "bin").mkdir()
+    hermes_bin = hermes_dir / "bin" / "hermes"
+    hermes_bin.write_text("#!/bin/sh\nexit 0", encoding="utf-8")
+    hermes_bin.chmod(0o755)
+    monkeypatch.setenv("ALPHRED_HERMES_BIN", str(hermes_bin))
+
+    from alphred.cli import _cmd_setup
+    res = _cmd_setup(["--profile", "basic", "--no-launch"])
+    assert res == 0
+
+    env_path = alphred_dir / ".env"
+    assert env_path.exists()
+    text = env_path.read_text(encoding="utf-8")
+    assert "ALPHRED_GATEWAY_URL" in text
+    assert "ALPHRED_PROFILE" in text

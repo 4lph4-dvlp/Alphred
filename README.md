@@ -151,8 +151,28 @@ alphred keys issue laptop            # prints the key ONCE (server stores only a
 alphred keys issue monitor --scope read   # read = monitoring only (GET); control = everything
 alphred keys list / revoke <name>    # revoke = that device is out, instantly
 alphred serve --host 0.0.0.0         # explicit external binding — REFUSES to start without a key
+alphred setup                        # creates a config template at ~/.hermes/alphred/.env
 alphred service install              # optional: auto-start on logon (schtasks / systemd / launchd)
 ```
+
+### Persistent Configuration via `.env`
+
+You can save your environment variables persistently in:
+- `~/.hermes/alphred/.env` (or `~/.hermes/.env`)
+
+When you run `alphred setup`, a template `.env` file is automatically created at `~/.hermes/alphred/.env` with comments explaining all available configuration options (compatible across Windows, macOS, and Linux).
+
+For example, to configure your server to bind to your Tailscale network and allow other devices to access it:
+1. Issue a client key for other devices:
+   ```bash
+   alphred keys issue ipad
+   ```
+2. Run `alphred setup` to generate the `.env` template if you haven't already.
+3. Open `~/.hermes/alphred/.env` and uncomment/set `ALPHRED_GATEWAY_URL`:
+   ```env
+   ALPHRED_GATEWAY_URL=http://<Tailscale-IP-or-0.0.0.0>:8643
+   ```
+4. Now, running `alphred` will automatically bind the background daemon server to the configured Tailscale IP/port, allowing other devices on the same Tailscale network to access the web chat (`http://<Tailscale-IP>:8643/chat`) or dashboard.
 
 For access beyond a trusted LAN, put a TLS reverse proxy (Caddy/nginx) in front of :8643.
 

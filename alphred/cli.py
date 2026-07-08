@@ -251,14 +251,32 @@ def _ensure_daemon():
     """
     try:
         import httpx
+        from urllib.parse import urlparse, urlunparse
         from .childproc import spawn_managed
         cfg = Config.load()
+
+        parsed = urlparse(cfg.gateway_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = str(parsed.port or 8643)
+
+        def _resolve_ping_url(url: str) -> str:
+            try:
+                p = urlparse(url)
+                if p.hostname == "0.0.0.0":
+                    netloc = f"127.0.0.1:{p.port}" if p.port is not None else "127.0.0.1"
+                    return urlunparse(p._replace(netloc=netloc))
+            except Exception:
+                pass
+            return url
+
+        ping_url = _resolve_ping_url(cfg.gateway_url)
+
         try:
-            if httpx.get(f"{cfg.gateway_url}/", timeout=2.0).status_code < 500:
+            if httpx.get(f"{ping_url}/", timeout=2.0).status_code < 500:
                 return None  # 이미 가동 중 — 우리가 띄운 게 아니므로 정리 대상 아님
         except Exception:
             pass
-        proc = spawn_managed([sys.executable, "-m", "alphred.cli", "serve"],
+        proc = spawn_managed([sys.executable, "-m", "alphred.cli", "serve", "--host", host, "--port", port],
                              log_path=cfg.alphred_home / "serve.log")
         sys.stderr.write("alphred: 백그라운드 큐 서비스를 시작하는 중...\n")
         # :8643 준비를 잠시 대기 → 첫 메시지부터 라우팅 훅이 살아있도록(기획 Fix B).
@@ -267,7 +285,7 @@ def _ensure_daemon():
         ready = False
         for _ in range(30):  # 최대 ~15초
             try:
-                if httpx.get(f"{cfg.gateway_url}/", timeout=1.0).status_code < 500:
+                if httpx.get(f"{ping_url}/", timeout=1.0).status_code < 500:
                     ready = True
                     break
             except Exception:
@@ -277,7 +295,7 @@ def _ensure_daemon():
             sys.stderr.write("alphred: 큐 서비스 준비 완료.\n")
         else:
             sys.stderr.write("alphred: 큐 준비가 지연됩니다 (채팅은 정상; 큐는 곧 활성화). "
-                             "끄려면 ALPHRED_NO_DAEMON=1 또는 `alphred --no-daemon`.\n")
+                              "끄려면 ALPHRED_NO_DAEMON=1 또는 `alphred --no-daemon`.\n")
         return proc
     except Exception:
         return None  # 데몬 기동 실패가 TUI 진입을 막지 않도록
@@ -316,6 +334,57 @@ def _cmd_setup(argv: list[str]) -> int:
         name = {"1": "basic", "2": "smart", "3": "full"}.get(pick, "smart")
         set_profile(cfg.alphred_home, name)
         print(f"프로파일 설정됨: {name}")
+    # .env 템플릿 생성
+    env_path = cfg.alphred_home / ".env"
+    if not env_path.exists():
+        try:
+            env_template = (
+                "# ==============================================================================\n"
+                "# Alphred Environment Configuration Template\n"
+                "# ==============================================================================\n"
+                "# 이 파일은 Alphred에서 독자적으로 사용하는 환경변수 설정 파일입니다.\n"
+                "# 사용하고자 하는 환경변수의 주석(#)을 제거하고 적절한 값을 입력해 주세요.\n"
+                "# 모든 OS(Windows, macOS, Linux)에서 호환됩니다.\n"
+                "# ==============================================================================\n\n"
+                "# [네트워크 및 접속 설정]\n"
+                "# 외부 기기(Tailscale 등)에서 웹이나 TUI 클라이언트로 접속할 때 사용할 URL 및 포트입니다.\n"
+                "# 외부 접속 시에는 반드시 접속 키가 발급되어 있거나 ALPHRED_API_KEY가 설정되어 있어야 합니다.\n"
+                "# ALPHRED_GATEWAY_URL=http://localhost:8643\n\n"
+                "# Gateway 인증을 위해 사용하는 API Key입니다. 외부 클라이언트가 API를 호출하거나 접속할 때 필요합니다.\n"
+                "# ALPHRED_API_KEY=\n\n"
+                "# 업스트림 Hermes API 서버의 주소입니다. (기본값: http://localhost:8642/v1)\n"
+                "# ALPHRED_HERMES_API=http://localhost:8642/v1\n\n\n"
+                "# [동작 제어 및 기능 프리셋]\n"
+                "# Alphred의 기본 동작 프리셋 프로파일입니다. (choices: basic, smart, full)\n"
+                "# - basic: 큐/선점/검증 위주 (최소 LLM 비용)\n"
+                "# - smart: + 의도판정 및 실행계획 자동 수립 (기본값, 권장)\n"
+                "# - full:  + 착수 전 사용자 확인 질문 및 스킬/도구 실행 실시간 감시(Watchdog)\n"
+                "# ALPHRED_PROFILE=smart\n\n\n"
+                "# [실행 리소스 설정]\n"
+                "# 동시에 실행할 수 있는 백그라운드 작업 슬롯 수입니다. (숫자 또는 \"auto\")\n"
+                "# ALPHRED_SLOTS=1\n"
+                "# 최대 동시 실행 가능 슬롯 수 상한입니다. (기본값: 4)\n"
+                "# ALPHRED_SLOTS_MAX=4\n\n\n"
+                "# [LLM 모델 라우팅 설정]\n"
+                "# 깊이(심화도)별로 최적화된 LLM 모델을 수동으로 명시 지정할 때 사용합니다.\n"
+                "# ALPHRED_MODEL_HIGH=\n"
+                "# ALPHRED_MODEL_MID=\n"
+                "# ALPHRED_MODEL_LOW=\n\n\n"
+                "# [고급 파이프라인 기능 설정]\n"
+                "# Plan v2 계획을 기반으로 스텝 단위 자율 실행(StepRunner)을 활성화합니다. (1: 활성화, 0: 비활성화)\n"
+                "# ALPHRED_ORCHESTRATE=0\n\n"
+                "# 도구 실행 오류 루프나 무진전(Stall) 상태를 실시간 감시해 개입하는 Watchdog 기능 활성화 여부입니다. (1: 활성화, 0: 비활성화)\n"
+                "# ALPHRED_WATCHDOG=0\n\n"
+                "# LLM-judge를 이용해 산출물의 수용검사 수용도 최종 검증을 수행할지 여부입니다. (1: 활성화, 0: 비활성화)\n"
+                "# ALPHRED_JUDGE=0\n\n"
+                "# 복수 모델의 MoA (Mixture of Agents)를 활성화하여 응답 품질을 높일지 여부입니다. (1: 활성화, 0: 비활성화)\n"
+                "# ALPHRED_MOA=0\n"
+            )
+            env_path.write_text(env_template, encoding="utf-8")
+            print(f"환경변수 템플릿 파일 생성됨: {env_path}")
+        except Exception as e:
+            sys.stderr.write(f"alphred: .env 템플릿 파일 생성 실패 ({e})\n")
+
     if not cfg.hermes_bin:
         sys.stderr.write(
             "alphred: hermes 실행 파일을 찾을 수 없습니다. "
@@ -540,6 +609,14 @@ def _collect_doctor(cfg: Config, deep: bool = False) -> dict:
     import httpx
 
     def _ping(url: str) -> dict:
+        from urllib.parse import urlparse, urlunparse
+        try:
+            p = urlparse(url)
+            if p.hostname == "0.0.0.0":
+                netloc = f"127.0.0.1:{p.port}" if p.port is not None else "127.0.0.1"
+                url = urlunparse(p._replace(netloc=netloc))
+        except Exception:
+            pass
         try:
             r = httpx.get(url, timeout=2.5)
             return {"up": r.status_code < 500, "status": r.status_code}

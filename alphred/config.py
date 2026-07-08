@@ -689,6 +689,22 @@ class Config:
         hermes_home = resolve_hermes_home()
         alphred_home = Path(os.environ.get("ALPHRED_HOME", "").strip() or (hermes_home / "alphred"))
         alphred_home.mkdir(parents=True, exist_ok=True)
+
+        # Load env files if exist (.env in hermes_home or alphred_home)
+        for env_dir in (hermes_home, alphred_home):
+            env_file = env_dir / ".env"
+            if env_file.exists():
+                try:
+                    for line in env_file.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip("'\"")
+                            if k and k not in os.environ:
+                                os.environ[k] = v
+                except Exception:
+                    pass
         # §35.4 프로파일 — §34 파이프라인 플래그들의 기본값을 결정(개별 env 가 항상 우선)
         prof = (os.environ.get("ALPHRED_PROFILE", "").strip().lower()
                 or read_profile(alphred_home) or "basic")
